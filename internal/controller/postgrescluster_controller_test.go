@@ -21,7 +21,10 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -49,25 +52,29 @@ var _ = Describe("PostgresCluster Controller", func() {
 			By("creating the custom resource for the Kind PostgresCluster")
 			err := k8sClient.Get(ctx, typeNamespacedName, postgrescluster)
 			if err != nil && errors.IsNotFound(err) {
-				resource := &dbv1alpha1.PostgresCluster{
+				cluster := &dbv1alpha1.PostgresCluster{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
 						Namespace: resourceNamespace,
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: dbv1alpha1.PostgresClusterSpec{
+						Version: "16",
+						Storage: dbv1alpha1.StorageSpec{
+							Size: resource.MustParse("1Gi"),
+						},
+					},
 				}
-				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+				Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 			}
 		})
 
 		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &dbv1alpha1.PostgresCluster{}
-			err := k8sClient.Get(ctx, typeNamespacedName, resource)
+			cluster := &dbv1alpha1.PostgresCluster{}
+			err := k8sClient.Get(ctx, typeNamespacedName, cluster)
 			Expect(err).NotTo(HaveOccurred())
 
 			By("Cleanup the specific resource instance PostgresCluster")
-			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
 		})
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
@@ -80,8 +87,20 @@ var _ = Describe("PostgresCluster Controller", func() {
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+
+			By("creating the credentials Secret")
+			secret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resourceName + "-credentials", Namespace: resourceNamespace}, secret)).To(Succeed())
+			Expect(secret.Data).To(HaveKey("password"))
+
+			By("creating the headless and client Services")
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resourceName + "-headless", Namespace: resourceNamespace}, &corev1.Service{})).To(Succeed())
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &corev1.Service{})).To(Succeed())
+
+			By("creating the StatefulSet")
+			sts := &appsv1.StatefulSet{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, sts)).To(Succeed())
+			Expect(*sts.Spec.Replicas).To(Equal(int32(1)))
 		})
 	})
 })

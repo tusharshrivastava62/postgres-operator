@@ -32,8 +32,11 @@ type PostgresClusterSpec struct {
 	// +optional
 	Instances int32 `json:"instances,omitempty"`
 
-	// version is the major PostgreSQL version to run, e.g. "16".
-	// +kubebuilder:validation:Enum=14;15;16;17
+	// version is the major PostgreSQL version to run, e.g. "16". The enum
+	// values are quoted so controller-gen emits string literals in the CRD
+	// schema; unquoted here, numeric-looking marker values like 16 are
+	// parsed as JSON numbers, which then can never match a string field.
+	// +kubebuilder:validation:Enum="14";"15";"16";"17"
 	// +kubebuilder:validation:Required
 	Version string `json:"version"`
 
