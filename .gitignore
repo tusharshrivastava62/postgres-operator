@@ -24,6 +24,9 @@ profile.cov
 go.work
 go.work.sum
 
+# Locally downloaded build tools (controller-gen, etc.)
+/bin/
+
 # env file
 .env
 
