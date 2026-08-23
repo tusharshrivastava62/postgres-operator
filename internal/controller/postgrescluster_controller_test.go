@@ -22,6 +22,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -62,6 +63,10 @@ var _ = Describe("PostgresCluster Controller", func() {
 						Storage: dbv1alpha1.StorageSpec{
 							Size: resource.MustParse("1Gi"),
 						},
+						Backup: dbv1alpha1.BackupSpec{
+							Enabled:  true,
+							Schedule: "0 2 * * *",
+						},
 					},
 				}
 				Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
@@ -101,6 +106,23 @@ var _ = Describe("PostgresCluster Controller", func() {
 			sts := &appsv1.StatefulSet{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, sts)).To(Succeed())
 			Expect(*sts.Spec.Replicas).To(Equal(int32(1)))
+
+			By("creating the backup CronJob and its PVC")
+			backupNSName := types.NamespacedName{Name: resourceName + "-backup", Namespace: resourceNamespace}
+			cj := &batchv1.CronJob{}
+			Expect(k8sClient.Get(ctx, backupNSName, cj)).To(Succeed())
+			Expect(cj.Spec.Schedule).To(Equal("0 2 * * *"))
+			Expect(k8sClient.Get(ctx, backupNSName, &corev1.PersistentVolumeClaim{})).To(Succeed())
+
+			By("removing the CronJob when backup is disabled")
+			Expect(k8sClient.Get(ctx, typeNamespacedName, postgrescluster)).To(Succeed())
+			postgrescluster.Spec.Backup.Enabled = false
+			Expect(k8sClient.Update(ctx, postgrescluster)).To(Succeed())
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			err = k8sClient.Get(ctx, backupNSName, cj)
+			Expect(errors.IsNotFound(err)).To(BeTrue())
 		})
 	})
 })
