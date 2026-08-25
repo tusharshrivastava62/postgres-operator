@@ -26,6 +26,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -69,6 +70,7 @@ type PostgresClusterReconciler struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch
 
 // Reconcile moves the actual cluster state (Secret, Services, StatefulSet)
 // closer to what a PostgresCluster's spec describes.
@@ -99,6 +101,13 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 	if err := r.reconcileBackup(ctx, cluster); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling backup: %w", err)
+	}
+	// Runs last and only on the happy path: status should reflect what the
+	// steps above actually converged to, not guess at partial progress from
+	// a step that just failed (that failure is already visible via the
+	// reconcile error itself, surfaced in logs/events and retried).
+	if err := r.reconcileStatus(ctx, cluster); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling status: %w", err)
 	}
 
 	log.Info("reconciled PostgresCluster", "instances", cluster.Spec.Instances, "version", cluster.Spec.Version)
@@ -393,6 +402,131 @@ func (r *PostgresClusterReconciler) reconcileBackupPVC(ctx context.Context, clus
 		return err
 	}
 	return r.Create(ctx, pvc)
+}
+
+// reconcileStatus computes Available/Progressing/Degraded conditions from
+// the actual state of the resources reconciled above and writes them to
+// .status.
+//
+// It only calls Status().Update when something actually changed
+// (meta.SetStatusCondition reports whether it did). Skipping the no-op
+// write matters here specifically because this controller watches its own
+// owned StatefulSet/Service/Secret/PVC/CronJob via Owns(), and .status
+// changes on the PostgresCluster itself also re-trigger Reconcile - an
+// unconditional Update on every pass would turn into a self-sustaining
+// reconcile loop instead of settling once state stops changing.
+func (r *PostgresClusterReconciler) reconcileStatus(ctx context.Context, cluster *dbv1alpha1.PostgresCluster) error {
+	sts := &appsv1.StatefulSet{}
+	stsErr := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: cluster.Name}, sts)
+	if stsErr != nil && !apierrors.IsNotFound(stsErr) {
+		return stsErr
+	}
+
+	var ready int32
+	if stsErr == nil {
+		ready = sts.Status.ReadyReplicas
+	}
+	desired := cluster.Spec.Instances
+
+	available := metav1.Condition{
+		Type:    "Available",
+		Status:  metav1.ConditionFalse,
+		Reason:  "InstancesNotReady",
+		Message: fmt.Sprintf("%d/%d instances ready", ready, desired),
+	}
+	progressing := metav1.Condition{
+		Type:    "Progressing",
+		Status:  metav1.ConditionTrue,
+		Reason:  "ScalingUp",
+		Message: fmt.Sprintf("%d/%d instances ready", ready, desired),
+	}
+	if desired > 0 && ready >= desired {
+		available.Status = metav1.ConditionTrue
+		available.Reason = "InstancesReady"
+		progressing.Status = metav1.ConditionFalse
+		progressing.Reason = "ReconcileComplete"
+	}
+
+	degraded, err := r.backupCondition(ctx, cluster)
+	if err != nil {
+		return err
+	}
+
+	changed := meta.SetStatusCondition(&cluster.Status.Conditions, available)
+	changed = meta.SetStatusCondition(&cluster.Status.Conditions, progressing) || changed
+	changed = meta.SetStatusCondition(&cluster.Status.Conditions, degraded) || changed
+	if cluster.Status.ObservedGeneration != cluster.Generation {
+		cluster.Status.ObservedGeneration = cluster.Generation
+		changed = true
+	}
+
+	if !changed {
+		return nil
+	}
+	return r.Status().Update(ctx, cluster)
+}
+
+// backupCondition reports backup health as a Degraded condition, driven by
+// the most recently finished Job the backup CronJob spawned. There's no
+// owner reference from PostgresCluster straight to those Jobs (they're
+// owned by the CronJob), so this finds them the same way the CronJob
+// controller's Pods find each other: by the labels the CronJob's JobTemplate
+// stamps on every Job it creates.
+func (r *PostgresClusterReconciler) backupCondition(ctx context.Context, cluster *dbv1alpha1.PostgresCluster) (metav1.Condition, error) {
+	condition := metav1.Condition{Type: "Degraded", Status: metav1.ConditionFalse}
+
+	if !cluster.Spec.Backup.Enabled {
+		condition.Reason = "BackupDisabled"
+		condition.Message = "scheduled backups are not enabled"
+		return condition, nil
+	}
+
+	jobs := &batchv1.JobList{}
+	if err := r.List(ctx, jobs, client.InNamespace(cluster.Namespace), client.MatchingLabels(labelsForCluster(cluster))); err != nil {
+		return metav1.Condition{}, err
+	}
+
+	var latest *batchv1.Job
+	for i := range jobs.Items {
+		job := &jobs.Items[i]
+		if !jobComplete(job) && !jobFailed(job) {
+			continue
+		}
+		if latest == nil || job.CreationTimestamp.After(latest.CreationTimestamp.Time) {
+			latest = job
+		}
+	}
+
+	switch {
+	case latest == nil:
+		condition.Reason = "BackupPending"
+		condition.Message = "no backup has finished yet"
+	case jobFailed(latest):
+		condition.Status = metav1.ConditionTrue
+		condition.Reason = "BackupFailed"
+		condition.Message = fmt.Sprintf("backup job %s failed", latest.Name)
+	default:
+		condition.Reason = "BackupHealthy"
+		condition.Message = fmt.Sprintf("last backup job %s completed successfully", latest.Name)
+	}
+	return condition, nil
+}
+
+func jobComplete(job *batchv1.Job) bool {
+	return jobHasCondition(job, batchv1.JobComplete)
+}
+
+func jobFailed(job *batchv1.Job) bool {
+	return jobHasCondition(job, batchv1.JobFailed)
+}
+
+func jobHasCondition(job *batchv1.Job, condType batchv1.JobConditionType) bool {
+	for _, c := range job.Status.Conditions {
+		if c.Type == condType && c.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
 }
 
 func pgIsReadyProbe(initialDelaySeconds, periodSeconds int32) *corev1.Probe {

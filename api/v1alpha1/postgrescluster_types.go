@@ -84,11 +84,14 @@ type BackupSpec struct {
 
 // PostgresClusterStatus defines the observed state of PostgresCluster.
 type PostgresClusterStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
 	// For Kubernetes API conventions, see:
 	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
+
+	// observedGeneration is the .metadata.generation this status was
+	// computed from, so a reader can tell whether status reflects the
+	// latest spec or is still catching up to it.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// conditions represent the current state of the PostgresCluster resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
@@ -107,6 +110,10 @@ type PostgresClusterStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Version",type=string,JSONPath=`.spec.version`
+// +kubebuilder:printcolumn:name="Instances",type=integer,JSONPath=`.spec.instances`
+// +kubebuilder:printcolumn:name="Available",type=string,JSONPath=`.status.conditions[?(@.type=="Available")].status`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // PostgresCluster is the Schema for the postgresclusters API
 type PostgresCluster struct {

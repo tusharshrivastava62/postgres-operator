@@ -51,6 +51,14 @@ rules:
   - update
   - watch
 - apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - db.db.youroperator.io
   resources:
   - postgresclusters

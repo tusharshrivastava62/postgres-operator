@@ -25,6 +25,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -114,6 +115,16 @@ var _ = Describe("PostgresCluster Controller", func() {
 			Expect(cj.Spec.Schedule).To(Equal("0 2 * * *"))
 			Expect(k8sClient.Get(ctx, backupNSName, &corev1.PersistentVolumeClaim{})).To(Succeed())
 
+			By("reporting status conditions - not yet available, no backup finished yet")
+			Expect(k8sClient.Get(ctx, typeNamespacedName, postgrescluster)).To(Succeed())
+			Expect(postgrescluster.Status.ObservedGeneration).To(Equal(postgrescluster.Generation))
+			available := meta.FindStatusCondition(postgrescluster.Status.Conditions, "Available")
+			Expect(available).NotTo(BeNil())
+			Expect(available.Status).To(Equal(metav1.ConditionFalse))
+			degraded := meta.FindStatusCondition(postgrescluster.Status.Conditions, "Degraded")
+			Expect(degraded).NotTo(BeNil())
+			Expect(degraded.Reason).To(Equal("BackupPending"))
+
 			By("removing the CronJob when backup is disabled")
 			Expect(k8sClient.Get(ctx, typeNamespacedName, postgrescluster)).To(Succeed())
 			postgrescluster.Spec.Backup.Enabled = false
@@ -123,6 +134,13 @@ var _ = Describe("PostgresCluster Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			err = k8sClient.Get(ctx, backupNSName, cj)
 			Expect(errors.IsNotFound(err)).To(BeTrue())
+
+			By("reflecting disabled backup in status")
+			Expect(k8sClient.Get(ctx, typeNamespacedName, postgrescluster)).To(Succeed())
+			degraded = meta.FindStatusCondition(postgrescluster.Status.Conditions, "Degraded")
+			Expect(degraded).NotTo(BeNil())
+			Expect(degraded.Reason).To(Equal("BackupDisabled"))
+			Expect(degraded.Status).To(Equal(metav1.ConditionFalse))
 		})
 	})
 })
