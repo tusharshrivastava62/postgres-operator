@@ -21,6 +21,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -77,15 +78,36 @@ type PostgresClusterReconciler struct {
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.24.1/pkg/reconcile
-func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.Result, reterr error) {
 	log := logf.FromContext(ctx)
 
 	cluster := &dbv1alpha1.PostgresCluster{}
 	if err := r.Get(ctx, req.NamespacedName, cluster); err != nil {
 		// Deletion: owner references handle cleanup of everything we create
-		// below, so there's nothing left to do.
+		// below, so there's nothing left to do. Nothing to record metrics
+		// against either - the object is gone, so there's no series left
+		// that recording one more point against would mean anything for.
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+
+	start := time.Now()
+	defer func() {
+		// A Conflict here means another goroutine updated the object between
+		// our Get and a later Update (e.g. reconcileStatus's Status().Update
+		// racing an owned-resource-triggered reconcile) - controller-runtime
+		// already requeues on any returned error, so this self-heals on the
+		// next attempt. It's labeled apart from "error" so an alert on
+		// reconcile errors doesn't page someone for a normal, expected race.
+		outcome := "success"
+		if reterr != nil {
+			outcome = "error"
+			if apierrors.IsConflict(reterr) {
+				outcome = "conflict"
+			}
+		}
+		reconcileTotal.WithLabelValues(cluster.Namespace, cluster.Name, outcome).Inc()
+		reconcileDurationSeconds.WithLabelValues(cluster.Namespace, cluster.Name).Observe(time.Since(start).Seconds())
+	}()
 
 	if err := r.reconcileSecret(ctx, cluster); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling secret: %w", err)
@@ -427,6 +449,7 @@ func (r *PostgresClusterReconciler) reconcileStatus(ctx context.Context, cluster
 		ready = sts.Status.ReadyReplicas
 	}
 	desired := cluster.Spec.Instances
+	instancesReady.WithLabelValues(cluster.Namespace, cluster.Name).Set(float64(ready))
 
 	available := metav1.Condition{
 		Type:    "Available",
@@ -508,6 +531,10 @@ func (r *PostgresClusterReconciler) backupCondition(ctx context.Context, cluster
 	default:
 		condition.Reason = "BackupHealthy"
 		condition.Message = fmt.Sprintf("last backup job %s completed successfully", latest.Name)
+		if latest.Status.CompletionTime != nil {
+			backupLastSuccessTimestampSeconds.WithLabelValues(cluster.Namespace, cluster.Name).
+				Set(float64(latest.Status.CompletionTime.Unix()))
+		}
 	}
 	return condition, nil
 }

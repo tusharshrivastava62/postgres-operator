@@ -21,6 +21,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -124,6 +125,10 @@ var _ = Describe("PostgresCluster Controller", func() {
 			degraded := meta.FindStatusCondition(postgrescluster.Status.Conditions, "Degraded")
 			Expect(degraded).NotTo(BeNil())
 			Expect(degraded.Reason).To(Equal("BackupPending"))
+
+			By("recording reconcile metrics")
+			Expect(testutil.ToFloat64(reconcileTotal.WithLabelValues(resourceNamespace, resourceName, "success"))).To(BeNumerically(">=", 1))
+			Expect(testutil.ToFloat64(instancesReady.WithLabelValues(resourceNamespace, resourceName))).To(Equal(float64(0)))
 
 			By("removing the CronJob when backup is disabled")
 			Expect(k8sClient.Get(ctx, typeNamespacedName, postgrescluster)).To(Succeed())
