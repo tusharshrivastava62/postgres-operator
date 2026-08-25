@@ -1,0 +1,26 @@
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: validating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-db-db-youroperator-io-v1alpha1-postgrescluster
+  failurePolicy: Fail
+  name: vpostgrescluster-v1alpha1.kb.io
+  rules:
+  - apiGroups:
+    - db.db.youroperator.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - postgresclusters
+  sideEffects: None
