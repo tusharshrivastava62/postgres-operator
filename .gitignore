@@ -27,6 +27,9 @@ go.work.sum
 # Locally downloaded build tools (controller-gen, etc.)
 /bin/
 
+# Packaged Helm charts (make helm-chart / helm package output)
+/dist/
+
 # env file
 .env
 
