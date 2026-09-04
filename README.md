@@ -62,6 +62,18 @@ Apply that, and the operator's reconcile loop takes it from there.
   indistinguishable from deleting every database the operator manages. See
   [`charts/postgres-operator/README.md`](charts/postgres-operator/README.md).
 
+## Known limitations
+
+- **`instances > 1` is not high availability.** Each instance is an independent Postgres
+  process with its own `PersistentVolumeClaim` - there's no streaming replication, no
+  primary/replica designation, and no leader election between them. The client `Service`
+  load-balances across all of them, so two connections can land on two databases that have
+  already diverged. Today, `instances` scales how many *unrelated* single-node databases share
+  a name and a `Service`, not how many members are in one replicated cluster. Don't run
+  `instances > 1` against real data. Real HA - streaming replication plus failover, likely via
+  [Patroni](https://github.com/patroni/patroni) or hand-rolled leader election - is a natural
+  next step, not yet built.
+
 ## Install
 
 **Prerequisite:** [cert-manager](https://cert-manager.io/) - the validating webhook's TLS
