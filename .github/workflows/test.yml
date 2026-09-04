@@ -27,3 +27,20 @@ jobs:
         run: |
           go mod tidy
           make test
+
+  docker-build:
+    permissions:
+      contents: read
+    name: Build image (no push)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # Catches a broken Dockerfile/build on every push and PR, well before
+      # the Release workflow would ever try to build the same image for
+      # real and push it.
+      - name: Build the operator image
+        run: docker build -t postgres-operator:ci-check .
