@@ -1,0 +1,16 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "postgres-operator.fullname" . }}-serving-cert
+  labels:
+  {{- include "postgres-operator.labels" . | nindent 4 }}
+spec:
+  dnsNames:
+  - '{{ include "postgres-operator.fullname" . }}-webhook-service.{{ .Release.Namespace
+    }}.svc'
+  - '{{ include "postgres-operator.fullname" . }}-webhook-service.{{ .Release.Namespace
+    }}.svc.{{ .Values.kubernetesClusterDomain }}'
+  issuerRef:
+    kind: Issuer
+    name: '{{ include "postgres-operator.fullname" . }}-selfsigned-issuer'
+  secretName: webhook-server-cert

@@ -1,0 +1,25 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "postgres-operator.fullname" . }}-postgrescluster-editor-role
+  labels:
+  {{- include "postgres-operator.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - db.db.youroperator.io
+  resources:
+  - postgresclusters
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - db.db.youroperator.io
+  resources:
+  - postgresclusters/status
+  verbs:
+  - get

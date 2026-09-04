@@ -175,6 +175,19 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
+.PHONY: helm-chart
+helm-chart: manifests kustomize helmify ## Regenerate charts/postgres-operator from config/default. Re-apply the crds/ move and static labels by hand afterward - see charts/postgres-operator/README.md.
+	rm -rf charts/postgres-operator/templates charts/postgres-operator/crds charts/postgres-operator/values.yaml
+	"$(KUSTOMIZE)" build config/default | "$(HELMIFY)" charts/postgres-operator
+	@echo ""
+	@echo "Regenerated. Before committing:"
+	@echo "  1. Move templates/postgrescluster-crd.yaml to crds/postgrescluster-crd.yaml"
+	@echo "  2. Replace its {{ include \"postgres-operator.labels\" . }} with the static"
+	@echo "     labels block (see charts/postgres-operator/README.md)"
+	@echo "  3. Rename templates/metrics-service.yaml's Service to end in -metrics-service,"
+	@echo "     not -controller-manager-metrics-service (helm lint will catch this if skipped)"
+	@echo "  4. Restore Chart.yaml's description/home/sources/keywords"
+
 ##@ Dependencies
 
 ## Location to install dependencies to
@@ -189,6 +202,7 @@ KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+HELMIFY ?= $(LOCALBIN)/helmify
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.8.1
@@ -205,6 +219,7 @@ ENVTEST_K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
   printf '%s\n' "$$v" | sed -E 's/^v?[0-9]+\.([0-9]+).*/1.\1/')
 
 GOLANGCI_LINT_VERSION ?= v2.12.2
+HELMIFY_VERSION ?= v0.4.20
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
 $(KUSTOMIZE): $(LOCALBIN)
@@ -214,6 +229,11 @@ $(KUSTOMIZE): $(LOCALBIN)
 controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary.
 $(CONTROLLER_GEN): $(LOCALBIN)
 	$(call go-install-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_TOOLS_VERSION))
+
+.PHONY: helmify
+helmify: $(HELMIFY) ## Download helmify locally if necessary.
+$(HELMIFY): $(LOCALBIN)
+	$(call go-install-tool,$(HELMIFY),github.com/arttor/helmify/cmd/helmify,$(HELMIFY_VERSION))
 
 .PHONY: setup-envtest
 setup-envtest: envtest ## Download the binaries required for ENVTEST in the local bin directory.

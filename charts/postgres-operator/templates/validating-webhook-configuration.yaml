@@ -1,0 +1,29 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "postgres-operator.fullname" . }}-validating-webhook-configuration
+  annotations:
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "postgres-operator.fullname" . }}-serving-cert
+  labels:
+  {{- include "postgres-operator.labels" . | nindent 4 }}
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: '{{ include "postgres-operator.fullname" . }}-webhook-service'
+      namespace: '{{ .Release.Namespace }}'
+      path: /validate-db-db-youroperator-io-v1alpha1-postgrescluster
+  failurePolicy: Fail
+  name: vpostgrescluster-v1alpha1.kb.io
+  rules:
+  - apiGroups:
+    - db.db.youroperator.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - postgresclusters
+  sideEffects: None

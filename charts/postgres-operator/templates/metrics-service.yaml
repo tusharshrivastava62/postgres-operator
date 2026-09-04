@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  # Shortened from the kustomize source's "-controller-manager-metrics-service"
+  # suffix: combined with a release name, that pushed the object name past
+  # Kubernetes' 63-character DNS label limit (helm lint catches this with a
+  # default release name; a real install with a longer release name would
+  # have failed at apply time instead).
+  name: {{ include "postgres-operator.fullname" . }}-metrics-service
+  labels:
+    control-plane: controller-manager
+  {{- include "postgres-operator.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.metricsService.type }}
+  selector:
+    app.kubernetes.io/name: postgres-operator
+    control-plane: controller-manager
+    {{- include "postgres-operator.selectorLabels" . | nindent 4 }}
+  ports:
+  {{- .Values.metricsService.ports | toYaml | nindent 2 }}

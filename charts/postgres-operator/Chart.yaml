@@ -1,0 +1,17 @@
+apiVersion: v2
+name: postgres-operator
+description: Kubernetes operator that provisions and manages PostgreSQL clusters from a PostgresCluster custom resource.
+home: https://github.com/tusharshrivastava62/postgres-operator
+sources:
+- https://github.com/tusharshrivastava62/postgres-operator
+keywords:
+- postgresql
+- postgres
+- database
+- operator
+- kubernetes
+type: application
+# Chart version: bump on any template/values change.
+version: 0.1.0
+# App version: tracks the operator image tag this chart defaults to.
+appVersion: "0.1.0"

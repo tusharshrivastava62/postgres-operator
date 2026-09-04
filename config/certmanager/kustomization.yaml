@@ -1,7 +1,14 @@
 resources:
 - issuer.yaml
 - certificate-webhook.yaml
-- certificate-metrics.yaml
+# certificate-metrics.yaml is intentionally not included: it's only
+# meaningful together with the [METRICS-WITH-CERTS] Deployment patch and
+# replacements in config/default/kustomization.yaml, neither of which this
+# project enables - the metrics endpoint uses controller-runtime's own
+# self-signed cert plus RBAC authn/authz instead (see cmd/main.go). Without
+# those replacements, this Certificate's dnsNames are literal unresolved
+# "SERVICE_NAME.SERVICE_NAMESPACE.svc" placeholders: a broken, unused
+# resource, not a harmless extra one.
 
 configurations:
 - kustomizeconfig.yaml
