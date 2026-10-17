@@ -182,4 +182,6 @@ Helm chart.
 
 ## License
 
-[Apache License 2.0](LICENSE)
+This project is licensed under the [Business Source License 1.1](LICENSE).
+Production use requires a commercial license. Contact tusharshrivastava62@gmail.com.
+Converts to Apache 2.0 on 2030-10-17.
