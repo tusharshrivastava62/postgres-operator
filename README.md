@@ -19,6 +19,9 @@ spec:
   version: "16"
   storage:
     size: 10Gi
+  resources:
+    limits:
+      memory: 1Gi
   backup:
     enabled: true
     schedule: "0 2 * * *"
@@ -43,7 +46,11 @@ Apply that, and the operator's reconcile loop takes it from there.
   `backup.enabled: true` with no `backup.schedule` (a cross-field rule the CRD schema alone
   can't express) and rejects shrinking `spec.storage.size` on update (Kubernetes
   `PersistentVolumeClaim`s can't shrink, so this fails fast at `kubectl apply` instead of
-  leaving a `StatefulSet` stuck).
+  leaving a `StatefulSet` stuck). It also requires `spec.resources.limits.memory` - PostgreSQL
+  sizes its memory from the container limit, and with none it sizes from the whole node - and
+  rejects a resource request that exceeds its limit. Non-blocking advice (a memory limit under
+  512Mi, `synchronousMode` on a single instance) comes back as a warning on an otherwise
+  successful apply.
 - **Exposes metrics** — `postgrescluster_reconcile_total`, `_reconcile_duration_seconds`,
   `_instances_ready`, and `_backup_last_success_timestamp_seconds` — on the same `/metrics`
   endpoint controller-runtime already serves, labeled per cluster.
