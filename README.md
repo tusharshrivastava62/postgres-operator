@@ -3,7 +3,7 @@
 [![Tests](https://github.com/tusharshrivastava62/postgres-operator/actions/workflows/test.yml/badge.svg)](https://github.com/tusharshrivastava62/postgres-operator/actions/workflows/test.yml)
 [![Lint](https://github.com/tusharshrivastava62/postgres-operator/actions/workflows/lint.yml/badge.svg)](https://github.com/tusharshrivastava62/postgres-operator/actions/workflows/lint.yml)
 [![E2E Tests](https://github.com/tusharshrivastava62/postgres-operator/actions/workflows/test-e2e.yml/badge.svg)](https://github.com/tusharshrivastava62/postgres-operator/actions/workflows/test-e2e.yml)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![License: BSL 1.1](https://img.shields.io/badge/License-BSL%201.1-blue.svg)](LICENSE)
 
 A Kubernetes operator, written in Go with [Kubebuilder](https://book.kubebuilder.io/) and
 [controller-runtime](https://github.com/kubernetes-sigs/controller-runtime), that turns a
