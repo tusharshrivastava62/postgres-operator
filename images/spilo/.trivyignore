@@ -1,0 +1,23 @@
+# Critical findings the image scan is told to tolerate.
+#
+# All of them are in the wal-g binary that upstream Spilo 4.1-p2 bundles
+# (wal-g v3.0.8, built from its own pinned Go dependencies); none is in an
+# operating system package or in Patroni, which scan clean. The images are not
+# modified from upstream, so these are fixed by upstream moving to a newer
+# wal-g, or by this project choosing a different backup tool. Backups are
+# stage 10 of the roadmap; until then the operator configures no backup or WAL
+# archiving target, so wal-g has nothing to talk to.
+#
+#   github.com/jackc/pgx/v5 5.8.0 (fixed in 5.9.0)
+#     CVE-2026-33815, CVE-2026-33816: memory-safety bugs.
+#   google.golang.org/grpc 1.64.1 (fixed in 1.79.3)
+#     CVE-2026-33186: authorization bypass in the gRPC *server* path
+#     validation. wal-g only acts as a client.
+#   Go standard library 1.25.6 (fixed in 1.25.7)
+#     CVE-2025-68121: certificate validation on TLS session resumption.
+
+# revisit when upstream updates wal-g
+CVE-2026-33815
+CVE-2026-33816
+CVE-2026-33186
+CVE-2025-68121
