@@ -36,7 +36,15 @@ type PostgresClusterSpec struct {
 	// values are quoted so controller-gen emits string literals in the CRD
 	// schema; unquoted here, numeric-looking marker values like 16 are
 	// parsed as JSON numbers, which then can never match a string field.
-	// +kubebuilder:validation:Enum="14";"15";"16";"17"
+	//
+	// It is immutable: changing the major version of an existing cluster
+	// would start the new binaries on the old data directory, which
+	// Postgres refuses. A real major-version upgrade (pg_upgrade) needs its
+	// own design, so until then the API server rejects any change. This is
+	// a CEL rule on the CRD, enforced by the API server itself, so it holds
+	// even if the validating webhook is down.
+	// +kubebuilder:validation:Enum="16";"17";"18"
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="version is immutable"
 	// +kubebuilder:validation:Required
 	Version string `json:"version"`
 

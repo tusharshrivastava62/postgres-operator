@@ -63,7 +63,8 @@ spec:
                   enabled=false to run without scheduled backups.
                 properties:
                   enabled:
-                    description: enabled turns the scheduled backup CronJob on or off.
+                    description: enabled turns the scheduled backup CronJob on or
+                      off.
                     type: boolean
                   schedule:
                     description: |-
@@ -74,8 +75,8 @@ spec:
                 type: object
               instances:
                 default: 1
-                description: instances is the number of PostgreSQL pods to run in the
-                  StatefulSet.
+                description: instances is the number of PostgreSQL pods to run in
+                  the StatefulSet.
                 format: int32
                 maximum: 9
                 minimum: 1
@@ -89,10 +90,10 @@ spec:
                     description: |-
                       Claims lists the names of resources, defined in spec.resourceClaims,
                       that are used by this container.
-  
+
                       This field depends on the
                       DynamicResourceAllocation feature gate.
-  
+
                       This field is immutable. It can only be set for containers.
                     items:
                       description: ResourceClaim references one entry in PodSpec.ResourceClaims.
@@ -165,12 +166,21 @@ spec:
                   values are quoted so controller-gen emits string literals in the CRD
                   schema; unquoted here, numeric-looking marker values like 16 are
                   parsed as JSON numbers, which then can never match a string field.
+
+                  It is immutable: changing the major version of an existing cluster
+                  would start the new binaries on the old data directory, which
+                  Postgres refuses. A real major-version upgrade (pg_upgrade) needs its
+                  own design, so until then the API server rejects any change. This is
+                  a CEL rule on the CRD, enforced by the API server itself, so it holds
+                  even if the validating webhook is down.
                 enum:
-                - "14"
-                - "15"
                 - "16"
                 - "17"
+                - "18"
                 type: string
+                x-kubernetes-validations:
+                - message: version is immutable
+                  rule: self == oldSelf
             required:
             - storage
             - version
@@ -182,12 +192,12 @@ spec:
                 description: |-
                   conditions represent the current state of the PostgresCluster resource.
                   Each condition has a unique type and reflects the status of a specific aspect of the resource.
-  
+
                   Standard condition types include:
                   - "Available": the resource is fully functional
                   - "Progressing": the resource is being created or updated
                   - "Degraded": the resource failed to reach or maintain its desired state
-  
+
                   The status of each condition is one of True, False, or Unknown.
                 items:
                   description: Condition contains details for one aspect of the current

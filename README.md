@@ -73,6 +73,12 @@ Apply that, and the operator's reconcile loop takes it from there.
   `instances > 1` against real data. Real HA - streaming replication plus failover, likely via
   [Patroni](https://github.com/patroni/patroni) or hand-rolled leader election - is a natural
   next step, not yet built.
+- **The PostgreSQL major version is fixed at creation.** Supported versions are 16, 17 and 18,
+  and `spec.version` can't be changed afterwards - the API server rejects it. Pointing newer
+  Postgres binaries at an older data directory doesn't work, and an in-place major-version
+  upgrade (`pg_upgrade`) isn't implemented. To move to a newer major version, create a new
+  cluster and migrate the data into it (the scheduled backups are `pg_dumpall` dumps, which
+  restore across major versions).
 
 ## Install
 
