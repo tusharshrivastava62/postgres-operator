@@ -27,6 +27,10 @@ import (
 	dbv1alpha1 "github.com/tusharshrivastava62/postgres-operator/api/v1alpha1"
 )
 
+// crdTestNamespace is where the CRD-validation specs (in this file and
+// crd_ha_validation_test.go) create their objects.
+const crdTestNamespace = "default"
+
 // These tests exercise validation that lives in the CRD schema itself (the
 // version enum and the version-immutability CEL rule), enforced by the
 // envtest API server. No reconciler or webhook is involved, so a failure
@@ -34,7 +38,7 @@ import (
 var _ = Describe("PostgresCluster CRD validation", func() {
 	newCluster := func(name, version string) *dbv1alpha1.PostgresCluster {
 		return &dbv1alpha1.PostgresCluster{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: crdTestNamespace},
 			Spec: dbv1alpha1.PostgresClusterSpec{
 				Version: version,
 				Storage: dbv1alpha1.StorageSpec{Size: resource.MustParse("1Gi")},
@@ -64,7 +68,7 @@ var _ = Describe("PostgresCluster CRD validation", func() {
 
 	Context("spec.version immutability", func() {
 		const name = "crd-version-immutable"
-		key := types.NamespacedName{Name: name, Namespace: "default"}
+		key := types.NamespacedName{Name: name, Namespace: crdTestNamespace}
 
 		BeforeEach(func() {
 			cluster := newCluster(name, "16")

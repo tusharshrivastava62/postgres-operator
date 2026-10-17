@@ -61,6 +61,65 @@ type PostgresClusterSpec struct {
 	// each PostgreSQL pod.
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitzero"`
+
+	// ha tunes high availability. Every cluster runs under Patroni, even a
+	// single-instance one, so there is no on/off switch: scaling instances
+	// from 1 to 3 later is the same code path as creating a 3-instance
+	// cluster, and the two modes never need to be converted into each other
+	// on existing data.
+	// +kubebuilder:default={}
+	// +optional
+	HA HASpec `json:"ha,omitzero"`
+
+	// image overrides the container image used for the PostgreSQL pods. When
+	// unset, the operator picks its built-in image for spec.version. Either
+	// way, the image actually in use is recorded in status.image, and an
+	// operator upgrade never changes it for an existing cluster: changing
+	// the image (for example to pick up a newer PostgreSQL minor release) is
+	// always a deliberate edit to this field.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	// +optional
+	Image string `json:"image,omitempty"`
+}
+
+// HASpec tunes failover behavior.
+type HASpec struct {
+	// failoverTimeout is how long, in seconds, a primary that stops
+	// responding keeps the leader lock before a replica may take over. It
+	// becomes Patroni's ttl, with loop_wait and retry_timeout set to a third
+	// of it so Patroni's rule loop_wait + 2*retry_timeout <= ttl always
+	// holds. Lower values mean faster failover but more false failovers on
+	// a slow control plane; Patroni's own floor is 20.
+	// +kubebuilder:validation:Minimum=20
+	// +kubebuilder:validation:Maximum=300
+	// +kubebuilder:default=30
+	// +optional
+	FailoverTimeout int32 `json:"failoverTimeout,omitempty"`
+
+	// synchronousMode makes commits wait for a synchronous standby, so an
+	// acknowledged transaction survives the loss of the primary. The price
+	// is write latency, and writes can block if no standby is available.
+	// With the default (false) replication is asynchronous: after a hard
+	// failure the most recent transactions the replicas had not yet
+	// received can be lost.
+	// +kubebuilder:default=false
+	// +optional
+	SynchronousMode bool `json:"synchronousMode,omitempty"`
+
+	// maximumLagOnFailover is how many bytes of WAL a replica may be behind
+	// the primary and still be eligible for promotion. A more-lagged replica
+	// is never promoted, which trades availability for not discarding more
+	// data. 0 means only a fully caught-up replica may be promoted.
+	//
+	// This is a pointer on purpose: 0 is a meaningful value but the default
+	// is not 0, and with a plain int64 and omitempty a client that reads and
+	// rewrites the object would drop an explicit 0 and have the API server
+	// silently re-default it to 1048576.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:default=1048576
+	// +optional
+	MaximumLagOnFailover *int64 `json:"maximumLagOnFailover,omitempty"`
 }
 
 // StorageSpec defines the persistent storage requested for each PostgreSQL
@@ -101,13 +160,34 @@ type PostgresClusterStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
+	// primaryInstance is the name of the pod currently holding the leader
+	// lock, i.e. the one the read-write Service routes to. It is empty while
+	// no primary exists, for example mid-failover.
+	// +optional
+	PrimaryInstance string `json:"primaryInstance,omitempty"`
+
+	// replicationLagBytes maps each replica pod to how many bytes of WAL it
+	// is behind the primary. Pods that are not currently streaming are
+	// omitted rather than reported as zero.
+	// +optional
+	ReplicationLagBytes map[string]int64 `json:"replicationLagBytes,omitempty"`
+
+	// image is the container image the PostgreSQL pods are running. It is
+	// recorded the first time the cluster is reconciled and only changes
+	// when spec.image does, so upgrading the operator never silently rolls
+	// existing databases onto a new image.
+	// +optional
+	Image string `json:"image,omitempty"`
+
 	// conditions represent the current state of the PostgresCluster resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
+	// Condition types:
+	// - "Available": a Ready primary exists, so the cluster accepts reads and writes
 	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
+	// - "Degraded": the most recent scheduled backup failed
+	// - "ReplicationHealthy": exactly one primary, and every replica is streaming within the lag limit
+	// - "FailoverInProgress": there is currently no primary, so a leader election is under way
 	//
 	// The status of each condition is one of True, False, or Unknown.
 	// +listType=map
@@ -120,6 +200,7 @@ type PostgresClusterStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Version",type=string,JSONPath=`.spec.version`
 // +kubebuilder:printcolumn:name="Instances",type=integer,JSONPath=`.spec.instances`
+// +kubebuilder:printcolumn:name="Primary",type=string,JSONPath=`.status.primaryInstance`
 // +kubebuilder:printcolumn:name="Available",type=string,JSONPath=`.status.conditions[?(@.type=="Available")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
