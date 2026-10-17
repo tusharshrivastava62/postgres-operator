@@ -88,10 +88,12 @@ Apply that, and the operator's reconcile loop takes it from there.
 
 ## Known limitations
 
-- **The default database images are built by this project, not upstream, and are published on
-  request** (see [`images/README.md`](images/README.md)). Until the first publication, set
-  `spec.image` (for example `ghcr.io/zalando/spilo-17:4.0-p3`). The image a cluster runs is
-  recorded in `status.image`, and upgrading the operator never changes it.
+- **The database images are built by this project, not upstream.** The default for each
+  PostgreSQL version is a build of upstream Spilo published to `ghcr.io/tusharshrivastava62`
+  (see [`images/README.md`](images/README.md)); set `spec.image` to use another. The image a
+  cluster runs is recorded in `status.image`, and upgrading the operator never changes it.
+  The bundled wal-g binary has known critical findings in its Go dependencies, tolerated in
+  [`images/spilo/.trivyignore`](images/spilo/.trivyignore) until upstream updates it.
 - **Patroni's REST API is unauthenticated** inside the cluster, and pods can reach each
   other's. The operator uses it to apply `spec.ha`. Restrict it with a `NetworkPolicy` that
   allows the operator and the cluster's own pods to reach port 8008.
