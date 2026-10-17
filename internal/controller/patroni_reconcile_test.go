@@ -39,10 +39,9 @@ import (
 	dbv1alpha1 "github.com/tusharshrivastava62/postgres-operator/api/v1alpha1"
 )
 
-// patroniEndpoints names the core Endpoints type once. It is deprecated in
-// Kubernetes, but it is what Patroni's Kubernetes DCS keeps its leader record
-// in, so it is what these tests have to create and read.
-type patroniEndpoints = corev1.Endpoints //nolint:staticcheck // see above
+// testPodImage is the image of the stand-in pods the specs create; no kubelet
+// runs in envtest, so it is never pulled.
+const testPodImage = "busybox"
 
 // Pure functions first: these need no API server.
 var _ = Describe("Patroni configuration", func() {
@@ -378,7 +377,7 @@ var _ = Describe("PostgresCluster Patroni resources", func() {
 		startLeader := func(name, ip string) {
 			pod := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{Name: name + "-0", Namespace: namespace, Labels: selectorLabelsFor(name)},
-				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "busybox"}}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: testPodImage}}},
 			}
 			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
 			DeferCleanup(func() {
@@ -411,9 +410,8 @@ var _ = Describe("PostgresCluster Patroni resources", func() {
 			Expect(err).NotTo(HaveOccurred())
 			startLeader(name, "10.1.2.3")
 
-			result, err := reconcileWithFake(name)
+			_, err = reconcileWithFake(name)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.RequeueAfter).To(BeZero())
 			Expect(fake.calls).To(ConsistOf("get 10.1.2.3"))
 		})
 
@@ -619,7 +617,7 @@ var _ = Describe("PostgresCluster Patroni resources", func() {
 			const name = "patroni-terminating"
 			pod := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{Name: name + "-0", Namespace: namespace, Labels: selectorLabelsFor(name)},
-				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "busybox"}}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: testPodImage}}},
 			}
 			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
 			DeferCleanup(func() {

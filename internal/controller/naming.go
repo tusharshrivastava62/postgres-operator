@@ -32,6 +32,7 @@ const (
 	// replaced, so routing writes by label could send them to a dead node.
 	labelRole = "db.youroperator.io/role"
 
+	appNameValue      = "postgrescluster"
 	componentPostgres = "postgres"
 	rolePrimary       = "primary"
 	roleReplica       = "replica"
@@ -43,7 +44,7 @@ const (
 // anything that must match database pods only.
 func labelsForCluster(cluster *dbv1alpha1.PostgresCluster) map[string]string {
 	return map[string]string{
-		labelAppName:     "postgrescluster",
+		labelAppName:     appNameValue,
 		labelAppInstance: cluster.Name,
 	}
 }
@@ -57,7 +58,7 @@ func podSelectorLabels(cluster *dbv1alpha1.PostgresCluster) map[string]string {
 
 func selectorLabelsFor(clusterName string) map[string]string {
 	return map[string]string{
-		labelAppName:      "postgrescluster",
+		labelAppName:      appNameValue,
 		labelAppInstance:  clusterName,
 		labelAppComponent: componentPostgres,
 	}

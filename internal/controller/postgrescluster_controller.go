@@ -21,6 +21,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -34,9 +35,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	dbv1alpha1 "github.com/tusharshrivastava62/postgres-operator/api/v1alpha1"
 )
@@ -60,6 +64,12 @@ type PostgresClusterReconciler struct {
 	// Patroni is how the operator reaches the members' REST API. Left nil it
 	// uses a plain HTTP client; tests substitute a fake.
 	Patroni PatroniAPI
+
+	// lastPrimary remembers, per cluster, the last primary this process
+	// observed, so a change of primary can be counted. It is kept in memory
+	// because the status field is cleared in the gap between two primaries,
+	// which is the very moment that has to be remembered.
+	lastPrimary sync.Map
 }
 
 // +kubebuilder:rbac:groups=db.youroperator.io,resources=postgresclusters,verbs=get;list;watch;create;update;patch;delete
@@ -189,7 +199,8 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// steps above actually converged to, not guess at partial progress from
 	// a step that just failed (that failure is already visible via the
 	// reconcile error itself, surfaced in logs/events and retried).
-	if err := r.reconcileStatus(ctx, cluster); err != nil {
+	healthy, err := r.reconcileStatus(ctx, cluster)
+	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling status: %w", err)
 	}
 
@@ -202,10 +213,13 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	log.Info("reconciled PostgresCluster", "instances", cluster.Spec.Instances, "version", cluster.Spec.Version, "image", image)
-	if !synced {
-		return ctrl.Result{RequeueAfter: leaderRequeueDelay}, nil
+	// Pod and Endpoints events trigger most re-observation, but replication
+	// lag and an expiring leader lock change without one, so keep looking:
+	// often while something is wrong, rarely when all is well.
+	if !synced || !healthy {
+		return ctrl.Result{RequeueAfter: unhealthyRefreshInterval}, nil
 	}
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: healthyRefreshInterval}, nil
 }
 
 // reconcileDeleted runs after a PostgresCluster is gone. The StatefulSet and
@@ -218,6 +232,9 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 // deleted this never runs, and the same cleanup runs instead before a
 // cluster of that name is next created (see Reconcile).
 func (r *PostgresClusterReconciler) reconcileDeleted(ctx context.Context, key types.NamespacedName) (ctrl.Result, error) {
+	// The cluster is gone, so stop reporting on it whatever happens next.
+	r.forgetMetrics(key)
+
 	sts := &appsv1.StatefulSet{}
 	err := r.Get(ctx, key, sts)
 	switch {
@@ -464,69 +481,6 @@ func (r *PostgresClusterReconciler) reconcileBackupPVC(ctx context.Context, clus
 	return r.Create(ctx, pvc)
 }
 
-// reconcileStatus computes Available/Progressing/Degraded conditions from
-// the actual state of the resources reconciled above and writes them to
-// .status.
-//
-// It only calls Status().Update when something actually changed
-// (meta.SetStatusCondition reports whether it did). Skipping the no-op
-// write matters here specifically because this controller watches its own
-// owned StatefulSet/Service/Secret/PVC/CronJob via Owns(), and .status
-// changes on the PostgresCluster itself also re-trigger Reconcile - an
-// unconditional Update on every pass would turn into a self-sustaining
-// reconcile loop instead of settling once state stops changing.
-func (r *PostgresClusterReconciler) reconcileStatus(ctx context.Context, cluster *dbv1alpha1.PostgresCluster) error {
-	sts := &appsv1.StatefulSet{}
-	stsErr := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: cluster.Name}, sts)
-	if stsErr != nil && !apierrors.IsNotFound(stsErr) {
-		return stsErr
-	}
-
-	var ready int32
-	if stsErr == nil {
-		ready = sts.Status.ReadyReplicas
-	}
-	desired := cluster.Spec.Instances
-	instancesReady.WithLabelValues(cluster.Namespace, cluster.Name).Set(float64(ready))
-
-	available := metav1.Condition{
-		Type:    "Available",
-		Status:  metav1.ConditionFalse,
-		Reason:  "InstancesNotReady",
-		Message: fmt.Sprintf("%d/%d instances ready", ready, desired),
-	}
-	progressing := metav1.Condition{
-		Type:    "Progressing",
-		Status:  metav1.ConditionTrue,
-		Reason:  "ScalingUp",
-		Message: fmt.Sprintf("%d/%d instances ready", ready, desired),
-	}
-	if desired > 0 && ready >= desired {
-		available.Status = metav1.ConditionTrue
-		available.Reason = "InstancesReady"
-		progressing.Status = metav1.ConditionFalse
-		progressing.Reason = "ReconcileComplete"
-	}
-
-	degraded, err := r.backupCondition(ctx, cluster)
-	if err != nil {
-		return err
-	}
-
-	changed := meta.SetStatusCondition(&cluster.Status.Conditions, available)
-	changed = meta.SetStatusCondition(&cluster.Status.Conditions, progressing) || changed
-	changed = meta.SetStatusCondition(&cluster.Status.Conditions, degraded) || changed
-	if cluster.Status.ObservedGeneration != cluster.Generation {
-		cluster.Status.ObservedGeneration = cluster.Generation
-		changed = true
-	}
-
-	if !changed {
-		return nil
-	}
-	return r.Status().Update(ctx, cluster)
-}
-
 // backupCondition reports backup health as a Degraded condition, driven by
 // the most recently finished Job the backup CronJob spawned. There's no
 // owner reference from PostgresCluster straight to those Jobs (they're
@@ -614,7 +568,10 @@ func generatePassword() (string, error) {
 // SetupWithManager sets up the controller with the Manager.
 func (r *PostgresClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&dbv1alpha1.PostgresCluster{}).
+		// Only spec changes (generation) are of interest. The controller
+		// writes status itself, and replication lag makes that frequent, so
+		// reacting to its own status updates would loop.
+		For(&dbv1alpha1.PostgresCluster{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
@@ -627,6 +584,14 @@ func (r *PostgresClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&rbacv1.Role{}).
 		Owns(&rbacv1.RoleBinding{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
+		// Neither of these is owned by the PostgresCluster: pods belong to the
+		// StatefulSet and Patroni owns the Endpoints, so they are mapped back
+		// to their cluster by label. Both are filtered to the changes that
+		// matter, because Patroni rewrites them every few seconds.
+		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(clusterForObject),
+			builder.WithPredicates(podChangePredicate())).
+		Watches(&patroniEndpoints{}, handler.EnqueueRequestsFromMapFunc(clusterForObject),
+			builder.WithPredicates(leaderChangePredicate())).
 		Named("postgrescluster").
 		Complete(r)
 }

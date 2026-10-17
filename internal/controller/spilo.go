@@ -123,7 +123,7 @@ func spiloEnv(cluster *dbv1alpha1.PostgresCluster) ([]corev1.EnvVar, error) {
 		// cluster's database pods as members and labels its own Endpoints
 		// and ConfigMaps in a way cleanup can find.
 		{Name: "KUBERNETES_LABELS", Value: fmt.Sprintf(
-			`{"%s":"postgrescluster","%s":"%s"}`, labelAppName, labelAppComponent, componentPostgres)},
+			`{"%s":"%s","%s":"%s"}`, labelAppName, appNameValue, labelAppComponent, componentPostgres)},
 		{Name: "PGUSER_SUPERUSER", ValueFrom: secretKeyRef(cluster, secretKeyUsername)},
 		{Name: "PGPASSWORD_SUPERUSER", ValueFrom: secretKeyRef(cluster, secretKeyPassword)},
 		{Name: "PGUSER_STANDBY", Value: replicationUser},

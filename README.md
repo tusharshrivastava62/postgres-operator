@@ -47,10 +47,13 @@ Apply that, and the operator's reconcile loop takes it from there.
   writes a timestamped dump to its own `PersistentVolumeClaim` when `backup.enabled` is `true`.
   Disabling backups removes the `CronJob` (and stops the schedule) while keeping the PVC and
   every backup already on it.
-- **Reports real status.** `.status.conditions` (`Available`, `Progressing`, `Degraded`) is
-  driven by actual `StatefulSet` readiness and backup `Job` outcomes, not guessed — and
-  `kubectl get postgrescluster` shows version, instance count, and availability directly via
-  printer columns.
+- **Reports real status.** `.status.primaryInstance` names the pod holding the leader lock,
+  taken from Patroni's own record rather than a pod label that can go stale on a hung primary,
+  and `.status.replicationLagBytes` gives each streaming replica's lag. `.status.conditions`
+  says what that means: `Available` (a Ready primary exists), `ReplicationHealthy` (every
+  replica is streaming within `maximumLagOnFailover`), `FailoverInProgress` (there was a
+  primary and now there is not), `Progressing`, and `Degraded` (the last backup failed).
+  `kubectl get postgrescluster` shows version, instances, primary and availability.
 - **Validates at admission time**, not just at reconcile time: a webhook rejects
   `backup.enabled: true` with no `backup.schedule` (a cross-field rule the CRD schema alone
   can't express) and rejects shrinking `spec.storage.size` on update (Kubernetes
@@ -60,9 +63,10 @@ Apply that, and the operator's reconcile loop takes it from there.
   rejects a resource request that exceeds its limit. Non-blocking advice (a memory limit under
   512Mi, `synchronousMode` on a single instance) comes back as a warning on an otherwise
   successful apply.
-- **Exposes metrics** — `postgrescluster_reconcile_total`, `_reconcile_duration_seconds`,
-  `_instances_ready`, and `_backup_last_success_timestamp_seconds` — on the same `/metrics`
-  endpoint controller-runtime already serves, labeled per cluster.
+- **Exposes metrics** on the `/metrics` endpoint controller-runtime already serves, labeled per
+  cluster: `postgrescluster_reconcile_total`, `_reconcile_duration_seconds`, `_instances_ready`,
+  `_backup_last_success_timestamp_seconds`, `_has_primary`, `_primary_changes_total` and
+  `_replication_lag_bytes` (per replica). A deleted cluster's series are dropped.
 - **Cleans up automatically.** Nearly every resource the operator creates is owner-referenced
   to the `PostgresCluster`, so deleting the custom resource deletes it; the exceptions are the
   data and backup volumes and the credentials `Secret` (see below). The `Endpoints` and

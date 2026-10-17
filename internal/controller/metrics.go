@@ -25,13 +25,14 @@ const (
 	labelNamespace = "namespace"
 	labelName      = "name"
 	labelResult    = "result"
+	labelInstance  = "instance"
 )
 
 // Custom, per-cluster metrics. These are registered on the same registry
 // controller-runtime already exposes at /metrics (see cmd/main.go), so
 // nothing extra needs to be wired up to serve them - only to record them.
 //
-// All four are labeled by namespace/name rather than aggregated globally.
+// All of them are labeled by namespace/name rather than aggregated globally.
 // For an operator this is the useful shape: "reconcileErrorsTotal is up"
 // tells you the controller is unhealthy in general, but "which cluster's
 // reconcileErrorsTotal is up" is what an on-call actually needs to act on.
@@ -59,6 +60,21 @@ var (
 		Name: "postgrescluster_backup_last_success_timestamp_seconds",
 		Help: "Unix timestamp of the most recently completed successful backup Job for a PostgresCluster.",
 	}, []string{labelNamespace, labelName})
+
+	hasPrimary = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "postgrescluster_has_primary",
+		Help: "1 when a PostgresCluster has a Ready primary holding a live leader lock, 0 otherwise. Mirrors the Available status condition.",
+	}, []string{labelNamespace, labelName})
+
+	primaryChangesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "postgrescluster_primary_changes_total",
+		Help: "Number of times the primary of a PostgresCluster moved to a different instance, as seen by this operator process.",
+	}, []string{labelNamespace, labelName})
+
+	replicationLagBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "postgrescluster_replication_lag_bytes",
+		Help: "Bytes of WAL each streaming replica is behind the primary. A replica that is not streaming has no series.",
+	}, []string{labelNamespace, labelName, labelInstance})
 )
 
 func init() {
@@ -67,5 +83,8 @@ func init() {
 		reconcileDurationSeconds,
 		instancesReady,
 		backupLastSuccessTimestampSeconds,
+		hasPrimary,
+		primaryChangesTotal,
+		replicationLagBytes,
 	)
 }
