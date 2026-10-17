@@ -1,0 +1,271 @@
+name: Spilo Images
+
+# Builds the PostgreSQL + Patroni images the operator runs, from a pinned
+# upstream Spilo release (images/spilo/upstream.env), for PostgreSQL 16, 17
+# and 18 on amd64 and arm64.
+#
+# Pull requests and pushes only build, check and scan. Nothing is published
+# unless the workflow is started by hand with "publish" ticked, so merging a
+# change never puts an image in the registry by itself. A weekly run does the
+# same build and scan to show newly disclosed vulnerabilities in the
+# operating system packages; fixing those means bumping IMAGE_REVISION and
+# publishing again.
+
+on:
+  pull_request:
+    paths:
+      - images/**
+      - .github/workflows/spilo-image.yml
+  push:
+    branches: [main]
+    paths:
+      - images/**
+      - .github/workflows/spilo-image.yml
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Push the images to ghcr.io
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: spilo-image-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/spilo
+
+jobs:
+  config:
+    name: Read pinned version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      ref: ${{ steps.read.outputs.SPILO_REF }}
+      commit: ${{ steps.read.outputs.SPILO_COMMIT }}
+      revision: ${{ steps.read.outputs.IMAGE_REVISION }}
+      tag: ${{ steps.read.outputs.SPILO_REF }}-r${{ steps.read.outputs.IMAGE_REVISION }}
+      publish: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Read images/spilo/upstream.env
+        id: read
+        run: grep -E '^[A-Z_]+=' images/spilo/upstream.env >> "$GITHUB_OUTPUT"
+
+      - name: Check the upstream tag still points at the pinned commit
+        env:
+          SPILO_REF: ${{ steps.read.outputs.SPILO_REF }}
+          SPILO_COMMIT: ${{ steps.read.outputs.SPILO_COMMIT }}
+        run: |
+          # An annotated tag is listed twice; the peeled "^{}" line is the commit.
+          actual=$(git ls-remote https://github.com/zalando/spilo.git "refs/tags/${SPILO_REF}" "refs/tags/${SPILO_REF}^{}" | tail -n 1 | cut -f 1)
+          echo "pinned: ${SPILO_COMMIT}"
+          echo "actual: ${actual}"
+          test "${actual}" = "${SPILO_COMMIT}"
+
+      # Logged in so a package that is still private is seen too; an anonymous
+      # read would find nothing there and let a tag be overwritten.
+      - name: Log in to the registry
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse to overwrite a published tag
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        env:
+          TAG: ${{ steps.read.outputs.SPILO_REF }}-r${{ steps.read.outputs.IMAGE_REVISION }}
+        run: |
+          # Published tags are immutable: finding the tag anywhere means stop.
+          for v in 16 17 18; do
+            if docker buildx imagetools inspect "${IMAGE_PREFIX}-${v}:${TAG}" > /dev/null 2>&1; then
+              echo "${IMAGE_PREFIX}-${v}:${TAG} already exists; bump IMAGE_REVISION in images/spilo/upstream.env" >&2
+              exit 1
+            fi
+          done
+
+  build:
+    name: PostgreSQL ${{ matrix.pg }} (${{ matrix.arch }})
+    needs: config
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # PGOLDVERSIONS is the supported older majors that Spilo's in-place
+          # major upgrade tooling would need; it mirrors how upstream builds.
+          - { pg: 16, old: "", arch: amd64, runner: ubuntu-latest }
+          - { pg: 16, old: "", arch: arm64, runner: ubuntu-24.04-arm }
+          - { pg: 17, old: "16", arch: amd64, runner: ubuntu-latest }
+          - { pg: 17, old: "16", arch: arm64, runner: ubuntu-24.04-arm }
+          - { pg: 18, old: "16 17", arch: amd64, runner: ubuntu-latest }
+          - { pg: 18, old: "16 17", arch: arm64, runner: ubuntu-24.04-arm }
+    env:
+      LOCAL_IMAGE: spilo-${{ matrix.pg }}:build
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Clone Spilo at the pinned commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: zalando/spilo
+          ref: ${{ needs.config.outputs.commit }}
+          path: spilo
+          persist-credentials: false
+
+      - name: Check out exactly the pinned commit
+        env:
+          PINNED: ${{ needs.config.outputs.commit }}
+        run: test "$(git -C spilo rev-parse HEAD)" = "${PINNED}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: spilo/postgres-appliance
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            PGVERSION=${{ matrix.pg }}
+            PGOLDVERSIONS=${{ matrix.old }}
+          load: true
+          tags: ${{ env.LOCAL_IMAGE }}
+          cache-from: type=gha,scope=spilo-${{ matrix.pg }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=spilo-${{ matrix.pg }}-${{ matrix.arch }}
+
+      - name: Check the image has what the operator relies on
+        run: images/spilo/smoke.sh "${LOCAL_IMAGE}" "${{ matrix.pg }}"
+
+      - name: Scan for vulnerabilities (report)
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: ${{ env.LOCAL_IMAGE }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: table
+          exit-code: "0"
+
+      - name: Scan for vulnerabilities (fail on critical)
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: ${{ env.LOCAL_IMAGE }}
+          severity: CRITICAL
+          ignore-unfixed: true
+          format: table
+          exit-code: "1"
+
+      - name: Log in to the registry
+        if: needs.config.outputs.publish == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pushed by digest only; the merge job below gives the digests a tag.
+      # The cache from the build above makes this step a re-export.
+      - name: Push by digest
+        id: push
+        if: needs.config.outputs.publish == 'true'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: spilo/postgres-appliance
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            PGVERSION=${{ matrix.pg }}
+            PGOLDVERSIONS=${{ matrix.old }}
+          labels: |
+            org.opencontainers.image.title=spilo-${{ matrix.pg }}
+            org.opencontainers.image.description=PostgreSQL ${{ matrix.pg }} with Patroni, built unmodified from zalando/spilo ${{ needs.config.outputs.ref }} for postgres-operator
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.config.outputs.tag }}
+          outputs: type=image,name=${{ env.IMAGE_PREFIX }}-${{ matrix.pg }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=spilo-${{ matrix.pg }}-${{ matrix.arch }}
+
+      - name: Export the digest
+        if: needs.config.outputs.publish == 'true'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+
+      - name: Upload the digest
+        if: needs.config.outputs.publish == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digest-${{ matrix.pg }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish PostgreSQL ${{ matrix.pg }}
+    needs: [config, build]
+    if: needs.config.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        pg: [16, 17, 18]
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download the digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: digest-${{ matrix.pg }}-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to the registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create the multi-architecture image
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGE: ${{ env.IMAGE_PREFIX }}-${{ matrix.pg }}
+          TAG: ${{ needs.config.outputs.tag }}
+        run: |
+          test "$(ls | wc -l)" -eq 2
+          docker buildx imagetools create -t "${IMAGE}:${TAG}" $(printf "${IMAGE}@sha256:%s " *)
+
+      - name: Show the result
+        env:
+          IMAGE: ${{ env.IMAGE_PREFIX }}-${{ matrix.pg }}
+          TAG: ${{ needs.config.outputs.tag }}
+        run: docker buildx imagetools inspect "${IMAGE}:${TAG}"

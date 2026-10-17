@@ -37,22 +37,32 @@ const (
 	pollEvery    = 3 * time.Second
 )
 
-// defaultSpiloImage is the upstream image used until the project's own images
-// are published. Override with E2E_POSTGRES_IMAGE.
-const defaultSpiloImage = "ghcr.io/zalando/spilo-17:4.0-p3"
+// The cluster the scenarios run against. E2E_POSTGRES_VERSION and
+// E2E_POSTGRES_IMAGE choose another PostgreSQL major version and the image
+// for it, which is how the project's own images for 16 and 18 are tried out;
+// by default the upstream 17 image is used.
+const (
+	defaultPostgresVersion = "17"
+	defaultSpiloImage      = "ghcr.io/zalando/spilo-17:4.0-p3"
+)
+
+func envOr(name, fallback string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return fallback
+}
 
 func clusterManifest() string {
-	image := os.Getenv("E2E_POSTGRES_IMAGE")
-	if image == "" {
-		image = defaultSpiloImage
-	}
+	version := envOr("E2E_POSTGRES_VERSION", defaultPostgresVersion)
+	image := envOr("E2E_POSTGRES_IMAGE", defaultSpiloImage)
 	return fmt.Sprintf(`apiVersion: db.youroperator.io/v1alpha1
 kind: PostgresCluster
 metadata:
   name: %s
   namespace: %s
 spec:
-  version: "17"
+  version: "%s"
   instances: %d
   image: %s
   storage:
@@ -63,7 +73,7 @@ spec:
       memory: 256Mi
     limits:
       memory: 1Gi
-`, clusterName, clusterNamespace, instances, image)
+`, clusterName, clusterNamespace, version, instances, image)
 }
 
 // operatorDeployment is the controller Deployment created by make deploy.

@@ -88,10 +88,10 @@ Apply that, and the operator's reconcile loop takes it from there.
 
 ## Known limitations
 
-- **Default images are not published yet.** The built-in image for each PostgreSQL version
-  points at this project's own Spilo builds, which the release workflow will publish. Until
-  then, set `spec.image` (for example `ghcr.io/zalando/spilo-17:4.0-p3`). The image a cluster
-  runs is recorded in `status.image`, and upgrading the operator never changes it.
+- **The default database images are built by this project, not upstream, and are published on
+  request** (see [`images/README.md`](images/README.md)). Until the first publication, set
+  `spec.image` (for example `ghcr.io/zalando/spilo-17:4.0-p3`). The image a cluster runs is
+  recorded in `status.image`, and upgrading the operator never changes it.
 - **Patroni's REST API is unauthenticated** inside the cluster, and pods can reach each
   other's. The operator uses it to apply `spec.ha`. Restrict it with a `NetworkPolicy` that
   allows the operator and the cluster's own pods to reach port 8008.
@@ -166,7 +166,8 @@ kubectl run psql --rm -it --restart=Never --image=postgres:17 -- \
 | `internal/webhook/v1alpha1/` | The validating admission webhook |
 | `config/` | Raw kustomize manifests (CRD, RBAC, manager, webhook, cert-manager) |
 | `charts/postgres-operator/` | The Helm chart (see its own README for the `crds/` caveat) |
-| `test/e2e/` | End-to-end tests that deploy the full stack into a real Kind cluster |
+| `images/` | The pinned upstream Spilo release and the workflow inputs for the database images |
+| `test/e2e/` | End-to-end tests that deploy the full stack into a real Kind cluster and break real clusters |
 
 ## Development
 

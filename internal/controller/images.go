@@ -16,16 +16,17 @@ import (
 
 // defaultImages maps spec.version to the image used when spec.image is
 // unset. These are Spilo (Patroni plus PostgreSQL) images built from
-// upstream by this project's image workflow; upstream's own images are
-// published rarely and lag behind PostgreSQL minor releases.
+// upstream by this project's image workflow (see images/README.md);
+// upstream's own images are published rarely and lag behind PostgreSQL minor
+// releases.
 //
 // Bumping a tag here never changes an existing cluster: the image a cluster
 // runs is recorded in status.image the first time it is reconciled and only
 // follows spec.image after that. See resolveImage.
 var defaultImages = map[string]string{
-	"16": "ghcr.io/tusharshrivastava62/spilo-16:4.0-p3",
-	"17": "ghcr.io/tusharshrivastava62/spilo-17:4.0-p3",
-	"18": "ghcr.io/tusharshrivastava62/spilo-18:4.0-p3",
+	"16": "ghcr.io/tusharshrivastava62/spilo-16:4.1-p2-r1",
+	"17": "ghcr.io/tusharshrivastava62/spilo-17:4.1-p2-r1",
+	"18": "ghcr.io/tusharshrivastava62/spilo-18:4.1-p2-r1",
 }
 
 // resolveImage decides which image a cluster should run.
