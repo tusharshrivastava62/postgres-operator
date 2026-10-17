@@ -63,9 +63,9 @@ type PostgresClusterReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=db.db.youroperator.io,resources=postgresclusters,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=db.db.youroperator.io,resources=postgresclusters/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=db.db.youroperator.io,resources=postgresclusters/finalizers,verbs=update
+// +kubebuilder:rbac:groups=db.youroperator.io,resources=postgresclusters,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=db.youroperator.io,resources=postgresclusters/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=db.youroperator.io,resources=postgresclusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete

@@ -10,7 +10,7 @@ A Kubernetes operator, written in Go with [Kubebuilder](https://book.kubebuilder
 single custom resource into a running, self-healing, backed-up PostgreSQL cluster.
 
 ```yaml
-apiVersion: db.db.youroperator.io/v1alpha1
+apiVersion: db.youroperator.io/v1alpha1
 kind: PostgresCluster
 metadata:
   name: my-database

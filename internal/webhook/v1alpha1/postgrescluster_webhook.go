@@ -46,7 +46,7 @@ func SetupPostgresClusterWebhookWithManager(mgr ctrl.Manager) error {
 // (storage can't shrink). Both were previously either unchecked or only
 // caught as a reconcile-time error, well after `kubectl apply` returned
 // success.
-// +kubebuilder:webhook:path=/validate-db-db-youroperator-io-v1alpha1-postgrescluster,mutating=false,failurePolicy=fail,sideEffects=None,groups=db.db.youroperator.io,resources=postgresclusters,verbs=create;update,versions=v1alpha1,name=vpostgrescluster-v1alpha1.kb.io,admissionReviewVersions=v1
+// +kubebuilder:webhook:path=/validate-db-youroperator-io-v1alpha1-postgrescluster,mutating=false,failurePolicy=fail,sideEffects=None,groups=db.youroperator.io,resources=postgresclusters,verbs=create;update,versions=v1alpha1,name=vpostgrescluster-v1alpha1.kb.io,admissionReviewVersions=v1
 
 // PostgresClusterCustomValidator struct is responsible for validating the PostgresCluster resource
 // when it is created, updated, or deleted.

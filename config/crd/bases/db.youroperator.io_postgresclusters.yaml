@@ -4,9 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
-  name: postgresclusters.db.db.youroperator.io
+  name: postgresclusters.db.youroperator.io
 spec:
-  group: db.db.youroperator.io
+  group: db.youroperator.io
   names:
     kind: PostgresCluster
     listKind: PostgresClusterList

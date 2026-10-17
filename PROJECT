@@ -3,7 +3,7 @@
 # and allow the plugins properly work.
 # More info: https://book.kubebuilder.io/reference/project-config.html
 cliVersion: 4.15.0
-domain: db.youroperator.io
+domain: youroperator.io
 layout:
 - go.kubebuilder.io/v4
 projectName: postgres-operator
@@ -13,7 +13,7 @@ resources:
     crdVersion: v1
     namespaced: true
   controller: true
-  domain: db.youroperator.io
+  domain: youroperator.io
   group: db
   kind: PostgresCluster
   path: github.com/tusharshrivastava62/postgres-operator/api/v1alpha1

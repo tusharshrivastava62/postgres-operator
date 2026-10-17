@@ -13,12 +13,12 @@ webhooks:
     service:
       name: '{{ include "postgres-operator.fullname" . }}-webhook-service'
       namespace: '{{ .Release.Namespace }}'
-      path: /validate-db-db-youroperator-io-v1alpha1-postgrescluster
+      path: /validate-db-youroperator-io-v1alpha1-postgrescluster
   failurePolicy: Fail
   name: vpostgrescluster-v1alpha1.kb.io
   rules:
   - apiGroups:
-    - db.db.youroperator.io
+    - db.youroperator.io
     apiVersions:
     - v1alpha1
     operations:

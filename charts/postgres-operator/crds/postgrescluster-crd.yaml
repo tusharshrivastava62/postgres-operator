@@ -1,7 +1,7 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: postgresclusters.db.db.youroperator.io
+  name: postgresclusters.db.youroperator.io
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
   # Files under crds/ are applied verbatim by Helm - no templating engine
@@ -11,7 +11,7 @@ metadata:
     app.kubernetes.io/name: postgres-operator
     app.kubernetes.io/managed-by: Helm
 spec:
-  group: db.db.youroperator.io
+  group: db.youroperator.io
   names:
     kind: PostgresCluster
     listKind: PostgresClusterList

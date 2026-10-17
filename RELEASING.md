@@ -15,7 +15,7 @@ tagging except the CRD, if it changed (see below).
 
    ```bash
    make manifests
-   cp config/crd/bases/db.db.youroperator.io_postgresclusters.yaml \
+   cp config/crd/bases/db.youroperator.io_postgresclusters.yaml \
      charts/postgres-operator/crds/postgrescluster-crd.yaml
    ```
 

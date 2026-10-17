@@ -1,7 +1,7 @@
 # This rule is not used by the project postgres-operator itself.
 # It is provided to allow the cluster admin to help manage permissions for users.
 #
-# Grants read-only access to db.db.youroperator.io resources.
+# Grants read-only access to db.youroperator.io resources.
 # This role is intended for users who need visibility into these resources
 # without permissions to modify them. It is ideal for monitoring purposes and limited-access viewing.
 
@@ -14,7 +14,7 @@ metadata:
   name: postgrescluster-viewer-role
 rules:
 - apiGroups:
-  - db.db.youroperator.io
+  - db.youroperator.io
   resources:
   - postgresclusters
   verbs:
@@ -22,7 +22,7 @@ rules:
   - list
   - watch
 - apiGroups:
-  - db.db.youroperator.io
+  - db.youroperator.io
   resources:
   - postgresclusters/status
   verbs:

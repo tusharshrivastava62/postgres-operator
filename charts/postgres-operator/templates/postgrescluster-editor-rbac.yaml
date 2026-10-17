@@ -6,7 +6,7 @@ metadata:
   {{- include "postgres-operator.labels" . | nindent 4 }}
 rules:
 - apiGroups:
-  - db.db.youroperator.io
+  - db.youroperator.io
   resources:
   - postgresclusters
   verbs:
@@ -18,7 +18,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - db.db.youroperator.io
+  - db.youroperator.io
   resources:
   - postgresclusters/status
   verbs:
