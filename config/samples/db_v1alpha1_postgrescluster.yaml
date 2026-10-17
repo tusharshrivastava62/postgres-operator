@@ -7,7 +7,10 @@ metadata:
   name: postgrescluster-sample
 spec:
   instances: 3
-  version: "16"
+  version: "17"
+  # Remove this line once the project's own images are published; until then
+  # point at an upstream Spilo image.
+  image: ghcr.io/zalando/spilo-17:4.0-p3
   storage:
     size: 1Gi
   backup:
@@ -18,4 +21,4 @@ spec:
       cpu: "250m"
       memory: "256Mi"
     limits:
-      memory: "512Mi"
+      memory: "1Gi"

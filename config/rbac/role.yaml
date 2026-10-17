@@ -7,6 +7,22 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - configmaps
+  - endpoints
+  - secrets
+  - serviceaccounts
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - persistentvolumeclaims
   verbs:
   - create
@@ -16,11 +32,8 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - secrets
-  - services
+  - pods
   verbs:
-  - create
-  - delete
   - get
   - list
   - patch
@@ -84,3 +97,28 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - policy
+  resources:
+  - poddisruptionbudgets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - rolebindings
+  - roles
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch

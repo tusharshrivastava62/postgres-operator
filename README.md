@@ -31,9 +31,18 @@ Apply that, and the operator's reconcile loop takes it from there.
 
 ## What it does
 
-- **Provisions** a `StatefulSet`, a headless `Service` (stable per-pod DNS) and a client
-  `Service`, and a `Secret` with a randomly generated superuser password — generated once,
+- **Provisions a Patroni-managed PostgreSQL cluster.** Every instance runs the same
+  [Spilo](https://github.com/zalando/spilo) container (PostgreSQL plus
+  [Patroni](https://github.com/patroni/patroni)), which elects one primary and streams to the
+  rest, even when `instances` is 1. The operator creates the `StatefulSet`, four `Service`s
+  (`<name>` always routes to the primary, `<name>-readonly` to replicas, plus a headless and a
+  config one), a `PodDisruptionBudget`, the `ServiceAccount`/`Role`/`RoleBinding` Patroni needs,
+  and a `Secret` with randomly generated superuser and replication passwords - generated once,
   never rewritten, so nothing rotates auth out from under a running cluster.
+- **Fails over.** Losing the primary promotes a replica; on a 3-instance cluster that took
+  about 2 seconds for a graceful stop. Failover timing, the permitted replica lag, and
+  synchronous replication are set under `spec.ha` and applied to the running cluster without
+  restarting any pod.
 - **Backs up** on a schedule: a `CronJob` runs `pg_dumpall`, gzip-compresses the output, and
   writes a timestamped dump to its own `PersistentVolumeClaim` when `backup.enabled` is `true`.
   Disabling backups removes the `CronJob` (and stops the schedule) while keeping the PVC and
@@ -54,15 +63,19 @@ Apply that, and the operator's reconcile loop takes it from there.
 - **Exposes metrics** — `postgrescluster_reconcile_total`, `_reconcile_duration_seconds`,
   `_instances_ready`, and `_backup_last_success_timestamp_seconds` — on the same `/metrics`
   endpoint controller-runtime already serves, labeled per cluster.
-- **Cleans up automatically.** Every resource the operator creates is owner-referenced to the
-  `PostgresCluster` that owns it, so deleting the custom resource deletes everything it created
-  (data PVCs and the backup PVC are intentionally the exception — see below).
+- **Cleans up automatically.** Nearly every resource the operator creates is owner-referenced
+  to the `PostgresCluster`, so deleting the custom resource deletes it; the exceptions are the
+  data and backup volumes and the credentials `Secret` (see below). The `Endpoints` and
+  `ConfigMap`s Patroni writes are removed too, so a new cluster with the same name starts clean.
 
 ## What it's *not*: a data-loss shortcut
 
-- Deleting a `PostgresCluster` does **not** delete its data or backup `PersistentVolumeClaim`s.
-  Kubernetes doesn't auto-delete `StatefulSet`-managed PVCs by default, and this operator
-  doesn't override that - clean those up explicitly if you actually want the data gone.
+- Deleting a `PostgresCluster` does **not** delete its data or backup `PersistentVolumeClaim`s,
+  or its `<name>-credentials` `Secret`. Kubernetes doesn't auto-delete `StatefulSet`-managed
+  PVCs by default, and this operator doesn't override that. The `Secret` stays because the
+  passwords are fixed inside the database when it is first created: recreate a cluster of the
+  same name on the old volumes and it must find the same passwords. Delete the PVCs and the
+  `Secret` together if you actually want the data gone.
 - `helm uninstall` does **not** delete the CRD (or, by extension, any `PostgresCluster` it
   manages anywhere in the cluster) - the CRD lives in Helm's `crds/` directory specifically
   because it's cluster-scoped and shared, and an ordinary `helm uninstall` deleting it would be
@@ -71,15 +84,18 @@ Apply that, and the operator's reconcile loop takes it from there.
 
 ## Known limitations
 
-- **`instances > 1` is not high availability.** Each instance is an independent Postgres
-  process with its own `PersistentVolumeClaim` - there's no streaming replication, no
-  primary/replica designation, and no leader election between them. The client `Service`
-  load-balances across all of them, so two connections can land on two databases that have
-  already diverged. Today, `instances` scales how many *unrelated* single-node databases share
-  a name and a `Service`, not how many members are in one replicated cluster. Don't run
-  `instances > 1` against real data. Real HA - streaming replication plus failover, likely via
-  [Patroni](https://github.com/patroni/patroni) or hand-rolled leader election - is a natural
-  next step, not yet built.
+- **Default images are not published yet.** The built-in image for each PostgreSQL version
+  points at this project's own Spilo builds, which the release workflow will publish. Until
+  then, set `spec.image` (for example `ghcr.io/zalando/spilo-17:4.0-p3`). The image a cluster
+  runs is recorded in `status.image`, and upgrading the operator never changes it.
+- **Patroni's REST API is unauthenticated** inside the cluster, and pods can reach each
+  other's. The operator uses it to apply `spec.ha`. Restrict it with a `NetworkPolicy` that
+  allows the operator and the cluster's own pods to reach port 8008.
+- **Changing pod-level settings restarts pods one after another without a controlled
+  switchover.** A new image or resource limits takes the primary down for a failover rather
+  than handing over first.
+- **Backups are still logical dumps** (`pg_dumpall` to a PVC), not continuous archiving, so
+  there is no point-in-time recovery.
 - **The PostgreSQL major version is fixed at creation.** Supported versions are 16, 17 and 18,
   and `spec.version` can't be changed afterwards - the API server rejects it. Pointing newer
   Postgres binaries at an older data directory doesn't work, and an in-place major-version
@@ -124,8 +140,8 @@ kubectl get postgrescluster
 ```
 
 ```
-NAME                     VERSION   INSTANCES   AVAILABLE   AGE
-postgrescluster-sample   16        3           True        48s
+NAME                     VERSION   INSTANCES   PRIMARY   AVAILABLE   AGE
+postgrescluster-sample   17        3                     True        48s
 ```
 
 Connect using the generated credentials:
@@ -133,7 +149,7 @@ Connect using the generated credentials:
 ```bash
 kubectl get secret postgrescluster-sample-credentials \
   -o jsonpath='{.data.password}' | base64 -d
-kubectl run psql --rm -it --restart=Never --image=postgres:16 -- \
+kubectl run psql --rm -it --restart=Never --image=postgres:17 -- \
   psql -h postgrescluster-sample -U postgres
 ```
 

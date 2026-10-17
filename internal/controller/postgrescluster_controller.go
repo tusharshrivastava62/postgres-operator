@@ -26,11 +26,13 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -39,16 +41,9 @@ import (
 	dbv1alpha1 "github.com/tusharshrivastava62/postgres-operator/api/v1alpha1"
 )
 
-const (
-	postgresPort          int32 = 5432
-	postgresPortName            = "postgres"
-	postgresContainerName       = "postgres"
-	postgresSuperuser           = "postgres"
-	dataVolumeName              = "data"
-	backupVolumeName            = "backup"
-	secretKeyUsername           = "username"
-	secretKeyPassword           = "password"
-)
+// leftoverRequeueDelay is how long to wait before checking again whether the
+// pods of a deleted cluster are gone.
+const leftoverRequeueDelay = 5 * time.Second
 
 // backupScript runs a full-cluster dump (all databases plus roles and other
 // global objects) and writes it, gzip-compressed, to the backup PVC with a
@@ -61,6 +56,10 @@ pg_dumpall | gzip > "/backups/$(date -u +%Y%m%dT%H%M%SZ).sql.gz"
 type PostgresClusterReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// Patroni is how the operator reaches the members' REST API. Left nil it
+	// uses a plain HTTP client; tests substitute a fake.
+	Patroni PatroniAPI
 }
 
 // +kubebuilder:rbac:groups=db.youroperator.io,resources=postgresclusters,verbs=get;list;watch;create;update;patch;delete
@@ -69,12 +68,24 @@ type PostgresClusterReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
+//
+// The next three are Patroni's own permissions (see patroniRules). The
+// operator needs them itself because Kubernetes only lets a principal create
+// a Role granting permissions it already holds. It also deletes the Endpoints
+// and ConfigMaps Patroni leaves behind when a cluster is deleted, which is
+// why those two have delete and pods does not.
+// +kubebuilder:rbac:groups="",resources=configmaps;endpoints,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;update;patch
 
-// Reconcile moves the actual cluster state (Secret, Services, StatefulSet)
-// closer to what a PostgresCluster's spec describes.
+// Reconcile moves the actual cluster state (Secret, Patroni's access
+// objects, Services, PodDisruptionBudget, StatefulSet) closer to what a
+// PostgresCluster's spec describes.
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.24.1/pkg/reconcile
@@ -83,11 +94,14 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	cluster := &dbv1alpha1.PostgresCluster{}
 	if err := r.Get(ctx, req.NamespacedName, cluster); err != nil {
-		// Deletion: owner references handle cleanup of everything we create
-		// below, so there's nothing left to do. Nothing to record metrics
-		// against either - the object is gone, so there's no series left
-		// that recording one more point against would mean anything for.
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		if apierrors.IsNotFound(err) {
+			// Owner references clean up everything the operator created.
+			// What Patroni created is not owned by anything, see
+			// reconcileDeleted. There is no series left to record metrics
+			// against either - the object is gone.
+			res, err = r.reconcileDeleted(ctx, req.NamespacedName)
+		}
+		return res, err
 	}
 
 	start := time.Now()
@@ -109,16 +123,63 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		reconcileDurationSeconds.WithLabelValues(cluster.Namespace, cluster.Name).Observe(time.Since(start).Seconds())
 	}()
 
+	// Refuse to roll out a spec without a memory limit even though the
+	// webhook rejects it: see hasMemoryLimit. Nothing existing is touched, so
+	// a running cluster keeps running while the spec is wrong.
+	if !hasMemoryLimit(cluster) {
+		log.Info("not reconciling: spec.resources.limits.memory is required")
+		return ctrl.Result{}, r.markInvalidSpec(ctx, cluster,
+			"spec.resources.limits.memory is required: PostgreSQL sizes its memory from the container limit")
+	}
+
+	// A cluster that has never been reconciled has no status.image yet. Start
+	// it from a clean slate: anything Patroni left from a deleted cluster of
+	// the same name must go before the first pod starts, and that cannot be
+	// done while the old pods are still shutting down.
+	if cluster.Status.Image == "" {
+		running, err := r.podsExist(ctx, cluster.Namespace, cluster.Name)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("checking for leftover pods: %w", err)
+		}
+		if running {
+			log.Info("waiting for pods of a previous cluster with this name to terminate")
+			return ctrl.Result{RequeueAfter: leftoverRequeueDelay}, nil
+		}
+		if err := r.cleanupPatroniState(ctx, cluster.Namespace, cluster.Name); err != nil {
+			return ctrl.Result{}, fmt.Errorf("cleaning up leftover Patroni state: %w", err)
+		}
+	}
+
+	image, ok := resolveImage(cluster)
+	if !ok {
+		return ctrl.Result{}, r.markInvalidSpec(ctx, cluster,
+			fmt.Sprintf("no default image for version %q and spec.image is not set", cluster.Spec.Version))
+	}
+	// Record the image before anything uses it, so that if the operator is
+	// upgraded between creating the first pod and finishing this reconcile
+	// the cluster is not started on a different default.
+	if cluster.Status.Image != image {
+		cluster.Status.Image = image
+		if err := r.Status().Update(ctx, cluster); err != nil {
+			return ctrl.Result{}, fmt.Errorf("recording image: %w", err)
+		}
+	}
+
 	if err := r.reconcileSecret(ctx, cluster); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling secret: %w", err)
 	}
-	if err := r.reconcileHeadlessService(ctx, cluster); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling headless service: %w", err)
+	// Before the StatefulSet: the pods cannot hold or renew the leader lock
+	// without these, see reconcilePatroniAccess.
+	if err := r.reconcilePatroniAccess(ctx, cluster); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling patroni access: %w", err)
 	}
-	if err := r.reconcileService(ctx, cluster); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling service: %w", err)
+	if err := r.reconcileServices(ctx, cluster); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling services: %w", err)
 	}
-	if err := r.reconcileStatefulSet(ctx, cluster); err != nil {
+	if err := r.reconcilePodDisruptionBudget(ctx, cluster); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling pod disruption budget: %w", err)
+	}
+	if err := r.reconcileStatefulSet(ctx, cluster, image); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling statefulset: %w", err)
 	}
 	if err := r.reconcileBackup(ctx, cluster); err != nil {
@@ -132,178 +193,155 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, fmt.Errorf("reconciling status: %w", err)
 	}
 
-	log.Info("reconciled PostgresCluster", "instances", cluster.Spec.Instances, "version", cluster.Spec.Version)
+	// After status, so a Patroni that is slow to answer never delays
+	// reporting. Nothing watches Patroni's configuration, so when there is no
+	// leader to talk to yet the only way to get back here is to ask.
+	synced, err := r.syncPatroniConfig(ctx, cluster)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("syncing patroni configuration: %w", err)
+	}
+
+	log.Info("reconciled PostgresCluster", "instances", cluster.Spec.Instances, "version", cluster.Spec.Version, "image", image)
+	if !synced {
+		return ctrl.Result{RequeueAfter: leaderRequeueDelay}, nil
+	}
 	return ctrl.Result{}, nil
 }
 
-// reconcileSecret ensures the credentials Secret exists, generating a random
-// password the first time. It deliberately never touches the Secret again
-// once created: overwriting StringData on every reconcile would rotate the
-// running cluster's password out from under it, since nothing here restarts
-// Postgres or updates its password to match.
+// reconcileDeleted runs after a PostgresCluster is gone. The StatefulSet and
+// the rest are garbage-collected through their owner references, but the
+// Endpoints and ConfigMaps Patroni created are not owned by anything, so they
+// are removed here, once the pods that would rewrite them have terminated.
+//
+// There is deliberately no finalizer: it would let a stuck cleanup block
+// deleting the custom resource. If the operator is down when a cluster is
+// deleted this never runs, and the same cleanup runs instead before a
+// cluster of that name is next created (see Reconcile).
+func (r *PostgresClusterReconciler) reconcileDeleted(ctx context.Context, key types.NamespacedName) (ctrl.Result, error) {
+	sts := &appsv1.StatefulSet{}
+	err := r.Get(ctx, key, sts)
+	switch {
+	case err == nil && len(sts.OwnerReferences) == 0:
+		// Orphaned on purpose (kubectl delete --cascade=orphan): the
+		// database is still running and its state must stay.
+		return ctrl.Result{}, nil
+	case err == nil:
+		return ctrl.Result{RequeueAfter: leftoverRequeueDelay}, nil
+	case !apierrors.IsNotFound(err):
+		return ctrl.Result{}, err
+	}
+
+	running, err := r.podsExist(ctx, key.Namespace, key.Name)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if running {
+		return ctrl.Result{RequeueAfter: leftoverRequeueDelay}, nil
+	}
+	return ctrl.Result{}, r.cleanupPatroniState(ctx, key.Namespace, key.Name)
+}
+
+// markInvalidSpec reports a spec the reconciler will not act on as
+// Progressing=False with reason InvalidSpec, and does not return an error:
+// retrying cannot fix a spec, and a change to it triggers a new reconcile.
+func (r *PostgresClusterReconciler) markInvalidSpec(ctx context.Context, cluster *dbv1alpha1.PostgresCluster, message string) error {
+	changed := meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+		Type:    "Progressing",
+		Status:  metav1.ConditionFalse,
+		Reason:  "InvalidSpec",
+		Message: message,
+	})
+	if cluster.Status.ObservedGeneration != cluster.Generation {
+		cluster.Status.ObservedGeneration = cluster.Generation
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return r.Status().Update(ctx, cluster)
+}
+
+// reconcileSecret ensures the credentials Secret exists, generating random
+// passwords the first time.
+//
+// The Secret is deliberately NOT owned by the PostgresCluster, unlike
+// everything else the operator creates. The data volumes outlive the cluster
+// (they are never deleted automatically), and the passwords inside them are
+// fixed when the database is first initialised: Patroni never resets them
+// afterwards. If deleting a cluster also deleted this Secret, recreating a
+// cluster of the same name on the retained volumes would generate new
+// passwords that no longer match the database, and nobody could log in or
+// replicate. Keeping the Secret means the old credentials are still there for
+// the old data. Delete it by hand together with the volumes.
+//
+// A key that is already present is never rewritten:
+// overwriting it on every reconcile would rotate the running cluster's
+// password out from under it, since nothing here restarts Postgres or updates
+// its password to match. A key that is missing from an existing Secret (the
+// replication password, for a Secret created before replication existed) is
+// added on its own, leaving the others alone.
 func (r *PostgresClusterReconciler) reconcileSecret(ctx context.Context, cluster *dbv1alpha1.PostgresCluster) error {
 	existing := &corev1.Secret{}
 	err := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: credentialsSecretName(cluster)}, existing)
-	if err == nil {
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	if apierrors.IsNotFound(err) {
+		existing = &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      credentialsSecretName(cluster),
+				Namespace: cluster.Namespace,
+				Labels:    labelsForCluster(cluster),
+			},
+			Type: corev1.SecretTypeOpaque,
+		}
+		if err := fillMissingCredentials(existing); err != nil {
+			return err
+		}
+		return r.Create(ctx, existing)
+	}
+
+	patch := client.MergeFrom(existing.DeepCopy())
+	if !missingCredentials(existing) {
 		return nil
 	}
-	if !apierrors.IsNotFound(err) {
+	if err := fillMissingCredentials(existing); err != nil {
 		return err
 	}
-
-	password, err := generatePassword()
-	if err != nil {
-		return fmt.Errorf("generating password: %w", err)
-	}
-
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      credentialsSecretName(cluster),
-			Namespace: cluster.Namespace,
-			Labels:    labelsForCluster(cluster),
-		},
-		Type: corev1.SecretTypeOpaque,
-		StringData: map[string]string{
-			secretKeyUsername: postgresSuperuser,
-			secretKeyPassword: password,
-		},
-	}
-	if err := controllerutil.SetControllerReference(cluster, secret, r.Scheme); err != nil {
-		return err
-	}
-	return r.Create(ctx, secret)
+	return r.Patch(ctx, existing, patch)
 }
 
-// reconcileHeadlessService ensures the headless (ClusterIP: None) Service
-// StatefulSet needs for stable per-pod DNS.
-func (r *PostgresClusterReconciler) reconcileHeadlessService(ctx context.Context, cluster *dbv1alpha1.PostgresCluster) error {
-	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: headlessServiceName(cluster), Namespace: cluster.Namespace}}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
-		svc.Labels = labelsForCluster(cluster)
-		svc.Spec.ClusterIP = corev1.ClusterIPNone
-		svc.Spec.Selector = labelsForCluster(cluster)
-		// Not-yet-ready pods still need resolvable DNS so peers can find
-		// them during startup/replication - a StatefulSet-with-Postgres
-		// convention, not just a headless-Service default.
-		svc.Spec.PublishNotReadyAddresses = true
-		svc.Spec.Ports = []corev1.ServicePort{
-			{Name: postgresPortName, Port: postgresPort, TargetPort: intstr.FromInt32(postgresPort)},
+// missingCredentials reports whether any key the cluster needs is absent.
+func missingCredentials(secret *corev1.Secret) bool {
+	for _, key := range []string{secretKeyUsername, secretKeyPassword, secretKeyReplicationPassword} {
+		if _, ok := secret.Data[key]; !ok {
+			return true
 		}
-		return controllerutil.SetControllerReference(cluster, svc, r.Scheme)
-	})
-	return err
+	}
+	return false
 }
 
-// reconcileService ensures the regular ClusterIP Service clients connect
-// through.
-func (r *PostgresClusterReconciler) reconcileService(ctx context.Context, cluster *dbv1alpha1.PostgresCluster) error {
-	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: cluster.Name, Namespace: cluster.Namespace}}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
-		svc.Labels = labelsForCluster(cluster)
-		svc.Spec.Selector = labelsForCluster(cluster)
-		svc.Spec.Ports = []corev1.ServicePort{
-			{Name: postgresPortName, Port: postgresPort, TargetPort: intstr.FromInt32(postgresPort)},
+// fillMissingCredentials adds whichever of the credential keys are absent,
+// and only those.
+func fillMissingCredentials(secret *corev1.Secret) error {
+	if secret.Data == nil {
+		secret.Data = map[string][]byte{}
+	}
+	if _, ok := secret.Data[secretKeyUsername]; !ok {
+		secret.Data[secretKeyUsername] = []byte(postgresSuperuser)
+	}
+	for _, key := range []string{secretKeyPassword, secretKeyReplicationPassword} {
+		if _, ok := secret.Data[key]; ok {
+			continue
 		}
-		return controllerutil.SetControllerReference(cluster, svc, r.Scheme)
-	})
-	return err
-}
-
-// reconcileStatefulSet ensures the StatefulSet running Postgres exists and
-// matches the spec.
-//
-// This intentionally does NOT use the CreateOrUpdate/mutate pattern used
-// for the Services above. spec.volumeClaimTemplates is immutable once a
-// StatefulSet is created, and the API server also defaults sub-fields on it
-// (e.g. VolumeMode) that our builder doesn't set - so rebuilding and
-// re-submitting that slice on every reconcile would trigger a spurious diff
-// against the persisted object and the Update would be rejected. Instead:
-// build the full object (including VolumeClaimTemplates) only for Create,
-// and on Update touch just the fields Kubernetes actually allows to change
-// after creation (replicas, pod template, labels).
-func (r *PostgresClusterReconciler) reconcileStatefulSet(ctx context.Context, cluster *dbv1alpha1.PostgresCluster) error {
-	desired := desiredStatefulSet(cluster)
-	if err := controllerutil.SetControllerReference(cluster, desired, r.Scheme); err != nil {
-		return err
+		password, err := generatePassword()
+		if err != nil {
+			return fmt.Errorf("generating %s: %w", key, err)
+		}
+		secret.Data[key] = []byte(password)
 	}
-
-	existing := &appsv1.StatefulSet{}
-	err := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: cluster.Name}, existing)
-	if apierrors.IsNotFound(err) {
-		return r.Create(ctx, desired)
-	}
-	if err != nil {
-		return err
-	}
-
-	existing.Labels = desired.Labels
-	existing.Spec.Replicas = desired.Spec.Replicas
-	existing.Spec.Template = desired.Spec.Template
-	return r.Update(ctx, existing)
-}
-
-// desiredStatefulSet builds the full StatefulSet for a cluster, including
-// the storage-backed volume claim template. Only used on first create; see
-// reconcileStatefulSet for why updates go through a narrower path.
-func desiredStatefulSet(cluster *dbv1alpha1.PostgresCluster) *appsv1.StatefulSet {
-	labels := labelsForCluster(cluster)
-	replicas := cluster.Spec.Instances
-
-	return &appsv1.StatefulSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      cluster.Name,
-			Namespace: cluster.Namespace,
-			Labels:    labels,
-		},
-		Spec: appsv1.StatefulSetSpec{
-			ServiceName: headlessServiceName(cluster),
-			Replicas:    &replicas,
-			Selector:    &metav1.LabelSelector{MatchLabels: labels},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  postgresContainerName,
-							Image: fmt.Sprintf("postgres:%s", cluster.Spec.Version),
-							Ports: []corev1.ContainerPort{
-								{Name: postgresPortName, ContainerPort: postgresPort},
-							},
-							Env: []corev1.EnvVar{
-								{Name: "POSTGRES_USER", ValueFrom: secretKeyRef(cluster, secretKeyUsername)},
-								{Name: "POSTGRES_PASSWORD", ValueFrom: secretKeyRef(cluster, secretKeyPassword)},
-								// Postgres refuses to initdb straight into a
-								// volume's mount point if it isn't empty
-								// (e.g. it has a lost+found dir), so this
-								// puts $PGDATA in a subdirectory instead -
-								// the standard workaround the official image
-								// documents.
-								{Name: "PGDATA", Value: "/var/lib/postgresql/data/pgdata"},
-							},
-							Resources: cluster.Spec.Resources,
-							VolumeMounts: []corev1.VolumeMount{
-								{Name: dataVolumeName, MountPath: "/var/lib/postgresql/data"},
-							},
-							ReadinessProbe: pgIsReadyProbe(5, 10),
-							LivenessProbe:  pgIsReadyProbe(30, 10),
-						},
-					},
-				},
-			},
-			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
-				{
-					ObjectMeta: metav1.ObjectMeta{Name: dataVolumeName, Labels: labels},
-					Spec: corev1.PersistentVolumeClaimSpec{
-						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-						Resources: corev1.VolumeResourceRequirements{
-							Requests: corev1.ResourceList{corev1.ResourceStorage: cluster.Spec.Storage.Size},
-						},
-						StorageClassName: cluster.Spec.Storage.StorageClassName,
-					},
-				},
-			},
-		},
-	}
+	return nil
 }
 
 // reconcileBackup ensures the scheduled backup CronJob matches
@@ -556,17 +594,6 @@ func jobHasCondition(job *batchv1.Job, condType batchv1.JobConditionType) bool {
 	return false
 }
 
-func pgIsReadyProbe(initialDelaySeconds, periodSeconds int32) *corev1.Probe {
-	return &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			Exec: &corev1.ExecAction{Command: []string{"pg_isready", "-U", postgresSuperuser}},
-		},
-		InitialDelaySeconds: initialDelaySeconds,
-		PeriodSeconds:       periodSeconds,
-		TimeoutSeconds:      5,
-	}
-}
-
 func secretKeyRef(cluster *dbv1alpha1.PostgresCluster, key string) *corev1.EnvVarSource {
 	return &corev1.EnvVarSource{
 		SecretKeyRef: &corev1.SecretKeySelector{
@@ -584,34 +611,22 @@ func generatePassword() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
-func labelsForCluster(cluster *dbv1alpha1.PostgresCluster) map[string]string {
-	return map[string]string{
-		"app.kubernetes.io/name":     "postgrescluster",
-		"app.kubernetes.io/instance": cluster.Name,
-	}
-}
-
-func credentialsSecretName(cluster *dbv1alpha1.PostgresCluster) string {
-	return cluster.Name + "-credentials"
-}
-
-func headlessServiceName(cluster *dbv1alpha1.PostgresCluster) string {
-	return cluster.Name + "-headless"
-}
-
-func backupName(cluster *dbv1alpha1.PostgresCluster) string {
-	return cluster.Name + "-backup"
-}
-
 // SetupWithManager sets up the controller with the Manager.
 func (r *PostgresClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&dbv1alpha1.PostgresCluster{}).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
-		Owns(&corev1.Secret{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&batchv1.CronJob{}).
+		// The three objects the database pods authenticate to the API with,
+		// and the budget protecting them from drains: watched so that
+		// deleting one is repaired immediately, not on the next unrelated
+		// event.
+		Owns(&corev1.ServiceAccount{}).
+		Owns(&rbacv1.Role{}).
+		Owns(&rbacv1.RoleBinding{}).
+		Owns(&policyv1.PodDisruptionBudget{}).
 		Named("postgrescluster").
 		Complete(r)
 }

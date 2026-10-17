@@ -65,6 +65,9 @@ var _ = Describe("PostgresCluster Controller", func() {
 						Storage: dbv1alpha1.StorageSpec{
 							Size: resource.MustParse("1Gi"),
 						},
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("512Mi")},
+						},
 						Backup: dbv1alpha1.BackupSpec{
 							Enabled:  true,
 							Schedule: "0 2 * * *",
