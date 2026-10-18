@@ -407,6 +407,32 @@ func clusterSpecs() {
 			g.Expect(out).To(Equal("t"))
 		}, 2*time.Minute, pollEvery).Should(Succeed())
 
+		By("reading the backups back, as the operator's status check does, without waiting for its schedule")
+		_, err = inCluster("create", "job", "manual-status", "--from=cronjob/"+clusterName+"-backup-status")
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func(g Gomega) {
+			count, err := clusterField(".status.backup.backupCount")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(count).NotTo(BeEmpty())
+			n, err := strconv.Atoi(count)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(n).To(BeNumerically(">=", 1))
+			for _, condition := range []string{"BackupHealthy", "WALArchivingHealthy"} {
+				status, err := conditionStatus(condition)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(status).To(Equal("True"), condition)
+			}
+			degraded, err := conditionStatus("Degraded")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(degraded).To(Equal("False"))
+			name, err := clusterField(".status.backup.lastBackupName")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(name).To(HavePrefix("base_"))
+			size, err := clusterField(".status.backup.lastBackupSizeBytes")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(size).NotTo(BeEmpty())
+		}, 5*time.Minute, pollEvery).Should(Succeed())
+
 		By("showing the new settings in the pod's backup environment, running as non-root")
 		out, err := runInPod(primary, `echo "$(id -u) $(cat /run/etc/wal-e.d/env/WALG_S3_PREFIX) `+
 			`$(cat /run/etc/wal-e.d/env/WALG_LIBSODIUM_KEY_TRANSFORM)"`)

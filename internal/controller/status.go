@@ -21,6 +21,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -312,11 +313,27 @@ func (r *PostgresClusterReconciler) reconcileStatus(ctx context.Context, cluster
 		progressing.Message = fmt.Sprintf("%d of %d pods are still being updated", outdated, len(pods.Items))
 	}
 
-	degraded := backupCondition(cluster)
+	backupEval, err := r.evaluateBackupNow(ctx, cluster)
+	if err != nil {
+		return clusterView{}, err
+	}
+	degraded := degradedCondition(cluster, backupEval)
 
 	changed := meta.SetStatusCondition(&cluster.Status.Conditions, available)
 	for _, c := range []metav1.Condition{progressing, replication, failover, degraded} {
 		changed = meta.SetStatusCondition(&cluster.Status.Conditions, c) || changed
+	}
+	if cluster.Spec.Backup.Enabled {
+		for _, c := range backupEval.conditions {
+			changed = meta.SetStatusCondition(&cluster.Status.Conditions, c) || changed
+		}
+	} else {
+		changed = meta.RemoveStatusCondition(&cluster.Status.Conditions, conditionBackupHealthy) || changed
+		changed = meta.RemoveStatusCondition(&cluster.Status.Conditions, conditionWALArchivingHealthy) || changed
+	}
+	if updated, ok := mergeBackupStatus(cluster, backupEval); ok {
+		cluster.Status.Backup = updated
+		changed = true
 	}
 	if cluster.Status.PrimaryInstance != obs.primary {
 		cluster.Status.PrimaryInstance = obs.primary
@@ -410,6 +427,9 @@ func (r *PostgresClusterReconciler) forgetMetrics(key client.ObjectKey) {
 	hasPrimary.DeletePartialMatch(match)
 	primaryChangesTotal.DeletePartialMatch(match)
 	replicationLagBytes.DeletePartialMatch(match)
+	backupCount.DeletePartialMatch(match)
+	backupLastSizeBytes.DeletePartialMatch(match)
+	walArchiveLagBytes.DeletePartialMatch(match)
 	r.lastPrimary.Delete(key.Namespace + "/" + key.Name)
 }
 
@@ -420,14 +440,79 @@ func boolToFloat(b bool) float64 {
 	return 0
 }
 
-// backupCondition is the Degraded condition. It stays False while backups are
-// off, and is Unknown while they are on, because nothing reads the backup
-// destination back yet.
-func backupCondition(cluster *dbv1alpha1.PostgresCluster) metav1.Condition {
+// evaluateBackupNow reads the newest backup report and works out what it
+// means. With backups off there is nothing to evaluate.
+func (r *PostgresClusterReconciler) evaluateBackupNow(
+	ctx context.Context, cluster *dbv1alpha1.PostgresCluster,
+) (backupEvaluation, error) {
 	if !cluster.Spec.Backup.Enabled {
-		return metav1.Condition{Type: "Degraded", Status: metav1.ConditionFalse,
+		return backupEvaluation{}, nil
+	}
+	report, observedAt, err := r.latestBackupReport(ctx, cluster)
+	if err != nil {
+		return backupEvaluation{}, err
+	}
+	eval := evaluateBackup(cluster.Spec.Backup, report, observedAt, time.Now())
+	if report != nil {
+		recordBackupMetrics(cluster, eval.status)
+	}
+	return eval, nil
+}
+
+// mergeBackupStatus returns the status.backup to store and whether it differs
+// from what is stored. Each part is refreshed only when the report carried it:
+// a run that could not read the bucket still has the archiver to report, and
+// must not wipe the last known backups. The restore-test fields belong to a
+// different writer and are kept.
+func mergeBackupStatus(cluster *dbv1alpha1.PostgresCluster, eval backupEvaluation) (dbv1alpha1.BackupStatus, bool) {
+	current := cluster.Status.Backup
+	if !cluster.Spec.Backup.Enabled {
+		cleared := dbv1alpha1.BackupStatus{Verification: current.Verification}
+		return cleared, !equality.Semantic.DeepEqual(current, cleared)
+	}
+	updated := current
+	if eval.hasBackups {
+		updated.LastBackupTime = eval.status.LastBackupTime
+		updated.LastBackupName = eval.status.LastBackupName
+		updated.LastBackupSizeBytes = eval.status.LastBackupSizeBytes
+		updated.BackupCount = eval.status.BackupCount
+		updated.OldestRecoveryPoint = eval.status.OldestRecoveryPoint
+	}
+	if eval.hasArchiver {
+		updated.WALArchiving = eval.status.WALArchiving
+	}
+	return updated, !equality.Semantic.DeepEqual(current, updated)
+}
+
+// degradedCondition rolls the backup conditions up into one. It is Unknown
+// until a status check has reported, True when anything about backups needs
+// attention, and False otherwise.
+func degradedCondition(cluster *dbv1alpha1.PostgresCluster, eval backupEvaluation) metav1.Condition {
+	if !cluster.Spec.Backup.Enabled {
+		return metav1.Condition{Type: conditionDegraded, Status: metav1.ConditionFalse,
 			Reason: "BackupDisabled", Message: "backups are not enabled"}
 	}
-	return metav1.Condition{Type: "Degraded", Status: metav1.ConditionUnknown,
-		Reason: "BackupNotObserved", Message: "backups are configured but their health is not monitored yet"}
+	var problems []string
+	allUnknown := len(eval.conditions) > 0
+	for _, c := range eval.conditions {
+		if c.Status != metav1.ConditionUnknown {
+			allUnknown = false
+		}
+		if c.Status == metav1.ConditionFalse {
+			problems = append(problems, c.Type+": "+c.Message)
+		}
+	}
+	if eval.retentionFailed {
+		problems = append(problems, "retention could not delete expired backups")
+	}
+	switch {
+	case len(problems) > 0:
+		return metav1.Condition{Type: conditionDegraded, Status: metav1.ConditionTrue,
+			Reason: "BackupUnhealthy", Message: strings.Join(problems, "; ")}
+	case allUnknown || len(eval.conditions) == 0:
+		return metav1.Condition{Type: conditionDegraded, Status: metav1.ConditionUnknown,
+			Reason: "BackupNotObserved", Message: "no recent backup status check has reported"}
+	}
+	return metav1.Condition{Type: conditionDegraded, Status: metav1.ConditionFalse,
+		Reason: "BackupHealthy", Message: "backups and WAL archiving are healthy"}
 }

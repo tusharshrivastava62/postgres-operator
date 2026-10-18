@@ -6,6 +6,9 @@
 !**/*.go
 **/*_test.go
 
+# Re-include files the Go source embeds into the binary
+!internal/controller/scripts/*.py
+
 # Re-include Go module files
 !go.mod
 !go.sum

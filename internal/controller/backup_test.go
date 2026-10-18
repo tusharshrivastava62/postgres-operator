@@ -33,6 +33,9 @@ import (
 // testBucket is the bucket name the backup specs use.
 const testBucket = "acme-db-backups"
 
+// testRegion is the region the backup specs use.
+const testRegion = "eu-west-1"
+
 const validHexKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 func envMap(env []corev1.EnvVar) map[string]corev1.EnvVar {
@@ -51,7 +54,7 @@ func backupCluster() *dbv1alpha1.PostgresCluster {
 			Backup: dbv1alpha1.BackupSpec{
 				Enabled: true, Schedule: nightlyCron,
 				Destination: &dbv1alpha1.BackupDestination{
-					Bucket: testBucket, Region: "eu-west-1", CredentialsSecret: "backup-s3",
+					Bucket: testBucket, Region: testRegion, CredentialsSecret: "backup-s3",
 				},
 				Retention: dbv1alpha1.BackupRetention{Full: 7, Days: 14},
 			},
@@ -72,7 +75,7 @@ var _ = Describe("The backup environment", func() {
 		Expect(env["USE_WALG_BACKUP"].Value).To(Equal("true"))
 		Expect(env["USE_WALG_RESTORE"].Value).To(Equal("true"))
 		Expect(env["BACKUP_SCHEDULE"].Value).To(Equal(nightlyCron))
-		Expect(env["AWS_REGION"].Value).To(Equal("eu-west-1"))
+		Expect(env["AWS_REGION"].Value).To(Equal(testRegion))
 	})
 
 	It("writes the storage prefix out in full, with the default path and the major version", func() {
@@ -133,15 +136,9 @@ var _ = Describe("The backup environment", func() {
 		Expect(envMap(backupEnv(backupCluster()))).NotTo(HaveKey("WALG_LIBSODIUM_KEY"))
 	})
 
-	DescribeTable("the single retention number handed to Spilo is the larger setting",
-		func(full, days, want int32) {
-			Expect(retainCount(dbv1alpha1.BackupRetention{Full: full, Days: days})).To(Equal(want))
-		},
-		Entry("days larger", int32(7), int32(14), int32(14)),
-		Entry("full larger", int32(30), int32(14), int32(30)),
-		Entry("both small", int32(1), int32(1), int32(1)),
-		Entry("unset", int32(0), int32(0), int32(1)),
-	)
+	It("tells Spilo to keep everything, since retention is the operator's job", func() {
+		Expect(envMap(backupEnv(backupCluster()))["BACKUP_NUM_TO_RETAIN"].Value).To(Equal("1000"))
+	})
 
 	It("is part of the pod template, so changing it replaces the pods", func() {
 		c := backupCluster()
@@ -180,7 +177,7 @@ var _ = Describe("Backups through the reconciler", func() {
 				Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")}},
 				Backup: dbv1alpha1.BackupSpec{
 					Enabled: true, Schedule: nightlyCron,
-					Destination: &dbv1alpha1.BackupDestination{Bucket: testBucket, Region: "eu-west-1", CredentialsSecret: name + "-s3"},
+					Destination: &dbv1alpha1.BackupDestination{Bucket: testBucket, Region: testRegion, CredentialsSecret: name + "-s3"},
 				},
 			},
 		}
@@ -195,7 +192,7 @@ var _ = Describe("Backups through the reconciler", func() {
 		ExpectWithOffset(1, k8sClient.Create(ctx, secret)).To(Succeed())
 		DeferCleanup(func() { ExpectWithOffset(1, client.IgnoreNotFound(k8sClient.Delete(ctx, secret))).To(Succeed()) })
 	}
-	goodCreds := map[string]string{"AWS_ACCESS_KEY_ID": "id", "AWS_SECRET_ACCESS_KEY": "secret"}
+	goodCreds := map[string]string{secretKeyAccessKey: "id", secretKeySecretKey: "secret"}
 	progressing := func(name string) *metav1.Condition {
 		c := &dbv1alpha1.PostgresCluster{}
 		ExpectWithOffset(1, k8sClient.Get(ctx, key(name), c)).To(Succeed())
@@ -314,7 +311,7 @@ var _ = Describe("Backups through the reconciler", func() {
 		Expect(k8sClient.Get(ctx, key(name+"-backup"), &corev1.PersistentVolumeClaim{})).To(Succeed())
 	})
 
-	It("reports Degraded as unknown while backups are on, since nothing reads them back yet", func() {
+	It("reports Degraded as unknown until a backup status check has reported", func() {
 		const name = "bk-degraded"
 		createSecret(name+"-s3", goodCreds)
 		newCluster(name, nil)
@@ -324,6 +321,6 @@ var _ = Describe("Backups through the reconciler", func() {
 		degraded := meta.FindStatusCondition(c.Status.Conditions, "Degraded")
 		Expect(degraded).NotTo(BeNil())
 		Expect(degraded.Status).To(Equal(metav1.ConditionUnknown))
-		Expect(strings.ToLower(degraded.Message)).To(ContainSubstring("not monitored"))
+		Expect(strings.ToLower(degraded.Message)).To(ContainSubstring("no recent backup status check"))
 	})
 })

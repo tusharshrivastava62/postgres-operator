@@ -199,6 +199,9 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if err := r.removeLegacyBackupCronJob(ctx, cluster); err != nil {
 		return ctrl.Result{}, fmt.Errorf("removing the old backup job: %w", err)
 	}
+	if err := r.reconcileBackupStatusJob(ctx, cluster, image); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling the backup status job: %w", err)
+	}
 	// Runs last and only on the happy path: status should reflect what the
 	// steps above actually converged to, not guess at partial progress from
 	// a step that just failed (that failure is already visible via the
@@ -405,6 +408,7 @@ func (r *PostgresClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// and the budget protecting them from drains: watched so that
 		// deleting one is repaired immediately, not on the next unrelated
 		// event.
+		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&rbacv1.Role{}).
 		Owns(&rbacv1.RoleBinding{}).

@@ -32,7 +32,9 @@ type patroniEndpoints = corev1.Endpoints //nolint:staticcheck // see above
 // database labels, such as backup Job pods, map to nothing.
 func clusterForObject(_ context.Context, obj client.Object) []reconcile.Request {
 	labels := obj.GetLabels()
-	if labels[labelAppName] != appNameValue || labels[labelAppComponent] != componentPostgres || labels[labelAppInstance] == "" {
+	component := labels[labelAppComponent]
+	if labels[labelAppName] != appNameValue || labels[labelAppInstance] == "" ||
+		(component != componentPostgres && component != componentBackupStatus) {
 		return nil
 	}
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{

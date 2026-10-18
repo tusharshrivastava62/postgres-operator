@@ -54,13 +54,18 @@ Apply that, and the operator's reconcile loop takes it from there.
   major version. Credentials and the key come from Secrets you create; the operator checks them
   before changing anything and reports what is wrong instead of starting pods that cannot start.
   A cluster that archives into another's path is refused rather than overwriting it.
+  Every 10 minutes a small job reads the bucket back, reports what it finds, and deletes backups
+  that are past `retention` (at least `full` of them are kept, and every one newer than `days`).
 - **Reports real status.** `.status.primaryInstance` names the pod holding the leader lock,
   taken from Patroni's own record rather than a pod label that can go stale on a hung primary,
   and `.status.replicationLagBytes` gives each streaming replica's lag. `.status.conditions`
   says what that means: `Available` (a Ready primary exists), `ReplicationHealthy` (every
   replica is streaming within `maximumLagOnFailover`), `FailoverInProgress` (there was a
   primary and now there is not), `Progressing`, and `Degraded` (the last backup failed).
-  `kubectl get postgrescluster` shows version, instances, primary and availability.
+  `kubectl get postgrescluster` shows version, instances, primary and availability. With
+  backups on, `.status.backup` shows the newest backup, how many exist, the earliest time a
+  restore can reach, and how far WAL archiving is behind, and the `BackupHealthy` and
+  `WALArchivingHealthy` conditions say whether that is acceptable.
 - **Validates at admission time**, not just at reconcile time: a webhook rejects
   `backup.enabled: true` with no `backup.schedule` (a cross-field rule the CRD schema alone
   can't express) and rejects shrinking `spec.storage.size` on update (Kubernetes
@@ -73,7 +78,8 @@ Apply that, and the operator's reconcile loop takes it from there.
 - **Exposes metrics** on the `/metrics` endpoint controller-runtime already serves, labeled per
   cluster: `postgrescluster_reconcile_total`, `_reconcile_duration_seconds`, `_instances_ready`,
   `_backup_last_success_timestamp_seconds`, `_has_primary`, `_primary_changes_total` and
-  `_replication_lag_bytes` (per replica). A deleted cluster's series are dropped.
+  `_replication_lag_bytes` (per replica), `_backup_count`, `_backup_last_size_bytes` and
+  `_wal_archive_lag_bytes`. A deleted cluster's series are dropped.
 - **Cleans up automatically.** Nearly every resource the operator creates is owner-referenced
   to the `PostgresCluster`, so deleting the custom resource deletes it; the exceptions are the
   data and backup volumes and the credentials `Secret` (see below). The `Endpoints` and
@@ -110,13 +116,12 @@ Apply that, and the operator's reconcile loop takes it from there.
   (about 2 seconds of refused writes), then the old primary. A new revision that cannot start
   stops the rollout after the first replica. A single-instance cluster has nobody to hand over
   to, so its pod is simply replaced.
-- **Backup retention and health are not reported yet.** Backups are taken and archived, but the
-  operator does not yet read the bucket back, so `status.backup`, the backup conditions and
-  restore testing are not populated, and retention is Spilo's own single number (the larger of
-  `retention.full` and `retention.days`). Restoring a new cluster from a backup is not wired up
-  yet either. Until then, archive failures show only in the database pods' logs and in
-  `pg_stat_archiver`, and a bucket that stops accepting writes lets WAL pile up on the primary's
-  disk.
+- **Restoring is not wired up yet.** Backups are taken, read back, reported and pruned, but
+  creating a new cluster from one (`spec.bootstrap.recovery`) and the scheduled restore test
+  (`spec.backup.verification`) are accepted by the API and not acted on yet. A bucket that stops
+  accepting writes still lets WAL pile up on the primary's disk until it is fixed: archiving
+  lag is reported (`WALArchivingHealthy`, `postgrescluster_wal_archive_lag_bytes`), so alert on
+  it.
 - **The PostgreSQL major version is fixed at creation.** Supported versions are 16, 17 and 18,
   and `spec.version` can't be changed afterwards - the API server rejects it. Pointing newer
   Postgres binaries at an older data directory doesn't work, and an in-place major-version

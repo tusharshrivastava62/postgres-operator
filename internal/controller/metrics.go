@@ -65,6 +65,21 @@ var (
 		Help: "Number of times the primary of a PostgresCluster moved to a different instance, as seen by this operator process.",
 	}, []string{labelNamespace, labelName})
 
+	backupCount = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "postgrescluster_backup_count",
+		Help: "Number of base backups in the destination, as of the last backup status check.",
+	}, []string{labelNamespace, labelName})
+
+	backupLastSizeBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "postgrescluster_backup_last_size_bytes",
+		Help: "Compressed size of the newest base backup.",
+	}, []string{labelNamespace, labelName})
+
+	walArchiveLagBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "postgrescluster_wal_archive_lag_bytes",
+		Help: "Bytes of WAL the primary has written that have not been archived, as of the last backup status check.",
+	}, []string{labelNamespace, labelName})
+
 	replicationLagBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "postgrescluster_replication_lag_bytes",
 		Help: "Bytes of WAL each streaming replica is behind the primary. A replica that is not streaming has no series.",
@@ -80,5 +95,8 @@ func init() {
 		hasPrimary,
 		primaryChangesTotal,
 		replicationLagBytes,
+		backupCount,
+		backupLastSizeBytes,
+		walArchiveLagBytes,
 	)
 }

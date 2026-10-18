@@ -58,13 +58,12 @@ func walgEndpoint(dest *dbv1alpha1.BackupDestination) string {
 	return scheme + "+" + style + "://" + rest
 }
 
-// retainCount is Spilo's single retention number. Spilo keeps a backup unless
-// there are more than that many AND it is older than that many days, so using
-// the larger of the two settings can only keep more than was asked for, never
-// less. The operator takes over retention itself in a later change.
-func retainCount(r dbv1alpha1.BackupRetention) int32 {
-	return max(r.Full, r.Days, 1)
-}
+// spiloRetainAll is Spilo's single retention number, set high enough that its
+// own backup script never deletes anything. Retention is the operator's job
+// (see scripts/backup_status.py), because Spilo's number is used as both a
+// count and a number of days and so cannot express "this many backups and this
+// many days", as the spike showed.
+const spiloRetainAll = "1000"
 
 // backupEnv is the environment that makes Spilo archive WAL and take base
 // backups with wal-g. It is empty when backups are off.
@@ -83,7 +82,7 @@ func backupEnv(cluster *dbv1alpha1.PostgresCluster) []corev1.EnvVar {
 		{Name: "USE_WALG_RESTORE", Value: envTrue},
 		{Name: "WALG_S3_PREFIX", Value: backupPrefix(dest, cluster.Namespace, cluster.Name, cluster.Spec.Version)},
 		{Name: "BACKUP_SCHEDULE", Value: backup.Schedule},
-		{Name: "BACKUP_NUM_TO_RETAIN", Value: fmt.Sprint(retainCount(backup.Retention))},
+		{Name: "BACKUP_NUM_TO_RETAIN", Value: spiloRetainAll},
 		{Name: "WALG_PREVENT_WAL_OVERWRITE", Value: envTrue},
 		{Name: secretKeyAccessKey, ValueFrom: secretRef(dest.CredentialsSecret, secretKeyAccessKey)},
 		{Name: secretKeySecretKey, ValueFrom: secretRef(dest.CredentialsSecret, secretKeySecretKey)},
@@ -167,4 +166,35 @@ func (r *PostgresClusterReconciler) backupSecretProblem(ctx context.Context, clu
 func (r *PostgresClusterReconciler) removeLegacyBackupCronJob(ctx context.Context, cluster *dbv1alpha1.PostgresCluster) error {
 	cj := &batchv1.CronJob{ObjectMeta: metav1.ObjectMeta{Name: backupName(cluster), Namespace: cluster.Namespace}}
 	return client.IgnoreNotFound(r.Delete(ctx, cj))
+}
+
+// walgClientEnv is what wal-g needs to reach the bucket when it is run
+// directly, in a pod that is not a database member and so has no Spilo
+// configuration step to write its environment for it.
+func walgClientEnv(cluster *dbv1alpha1.PostgresCluster) []corev1.EnvVar {
+	backup := cluster.Spec.Backup
+	if backup.Destination == nil {
+		return nil
+	}
+	dest := backup.Destination
+	env := []corev1.EnvVar{
+		{Name: "WALG_S3_PREFIX", Value: backupPrefix(dest, cluster.Namespace, cluster.Name, cluster.Spec.Version)},
+		{Name: secretKeyAccessKey, ValueFrom: secretRef(dest.CredentialsSecret, secretKeyAccessKey)},
+		{Name: secretKeySecretKey, ValueFrom: secretRef(dest.CredentialsSecret, secretKeySecretKey)},
+	}
+	if dest.Region != "" {
+		env = append(env, corev1.EnvVar{Name: "AWS_REGION", Value: dest.Region})
+	}
+	if dest.Endpoint != "" {
+		env = append(env,
+			corev1.EnvVar{Name: "AWS_ENDPOINT", Value: dest.Endpoint},
+			corev1.EnvVar{Name: "AWS_S3_FORCE_PATH_STYLE", Value: fmt.Sprint(dest.ForcePathStyle)},
+			corev1.EnvVar{Name: "WALG_DISABLE_S3_SSE", Value: envTrue})
+	}
+	if backup.Encryption != nil {
+		env = append(env,
+			corev1.EnvVar{Name: "WALG_LIBSODIUM_KEY", ValueFrom: secretRef(backup.Encryption.KeySecret, secretKeyEncKey)},
+			corev1.EnvVar{Name: "WALG_LIBSODIUM_KEY_TRANSFORM", Value: "hex"})
+	}
+	return env
 }
