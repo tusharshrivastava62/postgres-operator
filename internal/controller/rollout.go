@@ -31,6 +31,13 @@ import (
 // revision of the pod template it was created from.
 const labelRevision = "controller-revision-hash"
 
+// unreadyStuckAfter is how long a pod on the current revision may stay
+// unready before it stops holding the rollout back. A new replica that cannot
+// finish starting (its base backup waits on a primary whose WAL archiving is
+// failing, say) would otherwise keep the primary from ever being replaced
+// with the configuration that fixes it.
+const unreadyStuckAfter = 5 * time.Minute
+
 // rolloutRequeueDelay is how soon to look again while pods are being
 // replaced. Pod readiness events usually wake the controller sooner.
 const rolloutRequeueDelay = 5 * time.Second
@@ -70,6 +77,9 @@ type rolloutPod struct {
 	revision string
 	ready    bool
 	deleting bool
+	// unreadySince is when the pod last stopped being ready, or when it was
+	// created if it never was. It is zero for a ready pod.
+	unreadySince time.Time
 }
 
 func rolloutPodsOf(pods []corev1.Pod) []rolloutPod {
@@ -82,13 +92,22 @@ func rolloutPodsOf(pods []corev1.Pod) []rolloutPod {
 				ordinal = n
 			}
 		}
-		out = append(out, rolloutPod{
+		rp := rolloutPod{
 			name:     pod.Name,
 			ordinal:  ordinal,
 			revision: pod.Labels[labelRevision],
 			ready:    podReady(pod),
 			deleting: pod.DeletionTimestamp != nil,
-		})
+		}
+		if !rp.ready {
+			rp.unreadySince = pod.CreationTimestamp.Time
+			for _, c := range pod.Status.Conditions {
+				if c.Type == corev1.PodReady && !c.LastTransitionTime.IsZero() {
+					rp.unreadySince = c.LastTransitionTime.Time
+				}
+			}
+		}
+		out = append(out, rp)
 	}
 	return out
 }
@@ -111,13 +130,22 @@ func outdatedPods(updateRevision string, pods []rolloutPod) int {
 // planRollout decides the single next step. It is a pure function of what is
 // observed, so every ordering rule can be tested without a cluster.
 //
-// It never takes a step while anything is unsettled: a pod still starting or
-// terminating, a missing pod, no primary, or replicas not streaming. Taking
-// the next replica down then could leave no standby for a failover, and a new
-// revision that cannot start (a bad image) stops the rollout after the first
-// replica instead of working through the whole cluster.
+// It never takes a step while a pod it just updated is still starting, while
+// anything is terminating or missing, while there is no primary, or while
+// replicas are not streaming. Taking the next replica down then could leave no
+// standby for a failover, and a new revision that cannot start (a bad image)
+// stops the rollout after the first replica instead of working through the
+// whole cluster.
+//
+// Two cases are let through, because waiting in them is a deadlock:
+//
+//   - A pod that is outdated and not ready is replaced at once, in any role.
+//     It is serving nothing, and the newer template may be what fixes it.
+//   - A pod on the new revision that has stayed unready for unreadyStuckAfter
+//     no longer holds the rollout back. If it is the only other member, the
+//     outdated primary is replaced in place, since no replica can take over.
 func planRollout(
-	updateRevision, primary string, pods []rolloutPod, instances int32,
+	now time.Time, updateRevision, primary string, pods []rolloutPod, instances int32,
 	replicationHealthy bool, replicationMessage string, lags map[string]int64,
 ) rolloutAction {
 	if outdatedPods(updateRevision, pods) == 0 {
@@ -128,13 +156,35 @@ func planRollout(
 	}
 
 	for _, p := range pods {
-		switch {
-		case p.deleting:
+		if p.deleting {
 			return wait("waiting for %s to finish terminating", p.name)
-		case !p.ready:
-			return wait("waiting for %s to become ready", p.name)
 		}
 	}
+
+	var brokenOutdated []rolloutPod
+	stuck := false
+	for _, p := range pods {
+		if p.ready {
+			continue
+		}
+		if p.revision != updateRevision {
+			brokenOutdated = append(brokenOutdated, p)
+			continue
+		}
+		// With no timestamp to go on, assume it is only just unready.
+		if !p.unreadySince.IsZero() && now.Sub(p.unreadySince) >= unreadyStuckAfter {
+			stuck = true
+			continue
+		}
+		return wait("waiting for %s to become ready", p.name)
+	}
+	if len(brokenOutdated) > 0 {
+		slices.SortFunc(brokenOutdated, func(a, b rolloutPod) int { return b.ordinal - a.ordinal })
+		next := brokenOutdated[0]
+		return rolloutAction{kind: rolloutDeletePod, pod: next.name,
+			message: fmt.Sprintf("replacing %s, which is outdated and not ready", next.name)}
+	}
+
 	if int32(len(pods)) < instances {
 		return wait("waiting for %d of %d pods to be created", int(instances)-len(pods), instances)
 	}
@@ -148,7 +198,7 @@ func planRollout(
 		return rolloutAction{kind: rolloutDeletePod, pod: pods[0].name,
 			message: fmt.Sprintf("replacing %s, the only instance", pods[0].name)}
 	}
-	if !replicationHealthy {
+	if !replicationHealthy && !stuck {
 		return wait("waiting for replication to be healthy: %s", replicationMessage)
 	}
 
@@ -165,7 +215,8 @@ func planRollout(
 		outdatedReplicas = append(outdatedReplicas, p)
 	}
 
-	if len(outdatedReplicas) > 0 {
+	// Never take a second replica down while one is stuck.
+	if len(outdatedReplicas) > 0 && !stuck {
 		// Highest ordinal first, as a StatefulSet would.
 		slices.SortFunc(outdatedReplicas, func(a, b rolloutPod) int { return b.ordinal - a.ordinal })
 		next := outdatedReplicas[0]
@@ -176,8 +227,7 @@ func planRollout(
 		return rolloutAction{}
 	}
 
-	// Only the primary is left. Hand leadership to the replica that is
-	// furthest ahead, all of which are updated by now.
+	// Hand leadership to the replica that is furthest ahead.
 	candidate := ""
 	for _, p := range pods {
 		if p.name == primary {
@@ -192,6 +242,10 @@ func planRollout(
 		}
 	}
 	if candidate == "" {
+		if stuck {
+			return rolloutAction{kind: rolloutDeletePod, pod: primary,
+				message: fmt.Sprintf("replacing %s in place, since no replica can take over and one is stuck", primary)}
+		}
 		return wait("waiting for a streaming replica to take over from %s", primary)
 	}
 	return rolloutAction{kind: rolloutSwitchover, pod: primary, candidate: candidate,
@@ -218,7 +272,7 @@ func (r *PostgresClusterReconciler) reconcileRollout(
 	}
 
 	action := planRollout(
-		sts.Status.UpdateRevision, view.obs.primary, rolloutPodsOf(view.pods), cluster.Spec.Instances,
+		time.Now(), sts.Status.UpdateRevision, view.obs.primary, rolloutPodsOf(view.pods), cluster.Spec.Instances,
 		view.obs.replicationHealthy, view.obs.replicationMessage, view.obs.lags)
 
 	switch action.kind {

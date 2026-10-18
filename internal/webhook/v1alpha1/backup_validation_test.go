@@ -22,11 +22,18 @@ import (
 	dbv1alpha1 "github.com/tusharshrivastava62/postgres-operator/api/v1alpha1"
 )
 
+// testBucket and sourceCluster are names the backup specs share.
+const (
+	testBucket    = "acme-db-backups"
+	sourceCluster = "orders-old"
+	testSecret    = "backup-s3"
+)
+
 // nightlyCron is the base backup schedule the specs use.
 const nightlyCron = "0 2 * * *"
 
 func testDestination() *dbv1alpha1.BackupDestination {
-	return &dbv1alpha1.BackupDestination{Bucket: "acme-db-backups", CredentialsSecret: "backup-s3"}
+	return &dbv1alpha1.BackupDestination{Bucket: testBucket, Region: "eu-west-1", CredentialsSecret: testSecret}
 }
 
 var _ = Describe("PostgresCluster backup validation", func() {
@@ -72,6 +79,32 @@ var _ = Describe("PostgresCluster backup validation", func() {
 		})
 	})
 
+	Context("the region", func() {
+		It("is required for Amazon S3, where no endpoint is set", func() {
+			obj.Spec.Backup.Destination.Region = ""
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.backup.destination.region"))
+		})
+
+		It("can be left out for a store with its own endpoint", func() {
+			obj.Spec.Backup.Destination.Region = ""
+			obj.Spec.Backup.Destination.Endpoint = "http://minio:9000"
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("is required on the recovery source too", func() {
+			obj.Spec.Bootstrap = &dbv1alpha1.BootstrapSpec{Recovery: &dbv1alpha1.RecoverySpec{
+				SourceCluster: sourceCluster,
+				Destination:   dbv1alpha1.BackupDestination{Bucket: testBucket, CredentialsSecret: testSecret},
+			}}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.bootstrap.recovery.destination.region"))
+		})
+	})
+
 	Context("restore testing", func() {
 		It("needs a schedule", func() {
 			obj.Spec.Backup.Verification.Enabled = true
@@ -97,8 +130,8 @@ var _ = Describe("PostgresCluster backup validation", func() {
 	Context("restoring from a backup", func() {
 		recovery := func() *dbv1alpha1.BootstrapSpec {
 			return &dbv1alpha1.BootstrapSpec{Recovery: &dbv1alpha1.RecoverySpec{
-				SourceCluster: "orders-old",
-				Destination:   dbv1alpha1.BackupDestination{Bucket: "acme-db-backups", CredentialsSecret: "backup-s3"},
+				SourceCluster: sourceCluster,
+				Destination:   dbv1alpha1.BackupDestination{Bucket: testBucket, Region: "eu-west-1", CredentialsSecret: testSecret},
 			}}
 		}
 
@@ -130,7 +163,7 @@ var _ = Describe("PostgresCluster backup validation", func() {
 		It("works out the source's default path from its namespace and name", func() {
 			obj.Spec.Bootstrap = recovery()
 			obj.Spec.Bootstrap.Recovery.SourceNamespace = "staging"
-			obj.Name = "orders-old"
+			obj.Name = sourceCluster
 			obj.Spec.Backup.Destination.Path = "staging/orders-old"
 			_, err := validator.ValidateCreate(ctx, obj)
 			Expect(err).To(HaveOccurred())

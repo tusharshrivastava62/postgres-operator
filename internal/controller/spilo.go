@@ -35,7 +35,6 @@ const (
 	dataVolumeName              = "pgdata"
 	dataMountPath               = "/home/postgres/pgdata"
 	shmVolumeName               = "dshm"
-	backupVolumeName            = "backup"
 
 	secretKeyUsername            = "username"
 	secretKeyPassword            = "password"
@@ -104,11 +103,13 @@ func spiloEnv(cluster *dbv1alpha1.PostgresCluster) ([]corev1.EnvVar, error) {
 	if err != nil {
 		return nil, err
 	}
-	return []corev1.EnvVar{
+	backup := backupEnv(cluster)
+	env := make([]corev1.EnvVar, 0, 16+len(backup))
+	env = append(env, []corev1.EnvVar{
 		{Name: "SCOPE", Value: cluster.Name},
 		{Name: "PGVERSION", Value: cluster.Spec.Version},
 		{Name: "PGROOT", Value: dataMountPath + "/pgroot"},
-		{Name: "DCS_ENABLE_KUBERNETES_API", Value: "true"},
+		{Name: "DCS_ENABLE_KUBERNETES_API", Value: envTrue},
 		{Name: "KUBERNETES_ROLE_LABEL", Value: labelRole},
 		{Name: "KUBERNETES_LEADER_LABEL_VALUE", Value: rolePrimary},
 		{Name: "KUBERNETES_SCOPE_LABEL", Value: labelAppInstance},
@@ -125,7 +126,8 @@ func spiloEnv(cluster *dbv1alpha1.PostgresCluster) ([]corev1.EnvVar, error) {
 		{Name: "POD_IP", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"}}},
 		{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}}},
 		{Name: "SPILO_CONFIGURATION", Value: config},
-	}, nil
+	}...)
+	return append(env, backup...), nil
 }
 
 // sharedMemoryLimit sizes /dev/shm. Postgres uses it for parallel query, and

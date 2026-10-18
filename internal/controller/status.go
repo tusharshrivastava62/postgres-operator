@@ -312,10 +312,7 @@ func (r *PostgresClusterReconciler) reconcileStatus(ctx context.Context, cluster
 		progressing.Message = fmt.Sprintf("%d of %d pods are still being updated", outdated, len(pods.Items))
 	}
 
-	degraded, err := r.backupCondition(ctx, cluster)
-	if err != nil {
-		return clusterView{}, err
-	}
+	degraded := backupCondition(cluster)
 
 	changed := meta.SetStatusCondition(&cluster.Status.Conditions, available)
 	for _, c := range []metav1.Condition{progressing, replication, failover, degraded} {
@@ -421,4 +418,16 @@ func boolToFloat(b bool) float64 {
 		return 1
 	}
 	return 0
+}
+
+// backupCondition is the Degraded condition. It stays False while backups are
+// off, and is Unknown while they are on, because nothing reads the backup
+// destination back yet.
+func backupCondition(cluster *dbv1alpha1.PostgresCluster) metav1.Condition {
+	if !cluster.Spec.Backup.Enabled {
+		return metav1.Condition{Type: "Degraded", Status: metav1.ConditionFalse,
+			Reason: "BackupDisabled", Message: "backups are not enabled"}
+	}
+	return metav1.Condition{Type: "Degraded", Status: metav1.ConditionUnknown,
+		Reason: "BackupNotObserved", Message: "backups are configured but their health is not monitored yet"}
 }

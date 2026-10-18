@@ -27,6 +27,7 @@ spec:
     schedule: "0 2 * * *"
     destination:
       bucket: my-database-backups
+      region: eu-west-1
       credentialsSecret: backup-s3
 ```
 
@@ -46,10 +47,13 @@ Apply that, and the operator's reconcile loop takes it from there.
   about 2 seconds for a graceful stop. Failover timing, the permitted replica lag, and
   synchronous replication are set under `spec.ha` and applied to the running cluster without
   restarting any pod.
-- **Backs up** on a schedule: a `CronJob` runs `pg_dumpall`, gzip-compresses the output, and
-  writes a timestamped dump to its own `PersistentVolumeClaim` when `backup.enabled` is `true`.
-  Disabling backups removes the `CronJob` (and stops the schedule) while keeping the PVC and
-  every backup already on it.
+- **Backs up continuously.** With `backup.enabled`, the primary archives its WAL to an S3 or
+  S3-compatible bucket as it is produced and takes a base backup on `schedule`, so a
+  database can be restored to any moment since the oldest kept base backup. Backups can be
+  encrypted with a key you hold, and are written under a path that includes the PostgreSQL
+  major version. Credentials and the key come from Secrets you create; the operator checks them
+  before changing anything and reports what is wrong instead of starting pods that cannot start.
+  A cluster that archives into another's path is refused rather than overwriting it.
 - **Reports real status.** `.status.primaryInstance` names the pod holding the leader lock,
   taken from Patroni's own record rather than a pod label that can go stale on a hung primary,
   and `.status.replicationLagBytes` gives each streaming replica's lag. `.status.conditions`
@@ -106,8 +110,13 @@ Apply that, and the operator's reconcile loop takes it from there.
   (about 2 seconds of refused writes), then the old primary. A new revision that cannot start
   stops the rollout after the first replica. A single-instance cluster has nobody to hand over
   to, so its pod is simply replaced.
-- **Backups are still logical dumps** (`pg_dumpall` to a PVC), not continuous archiving, so
-  there is no point-in-time recovery.
+- **Backup retention and health are not reported yet.** Backups are taken and archived, but the
+  operator does not yet read the bucket back, so `status.backup`, the backup conditions and
+  restore testing are not populated, and retention is Spilo's own single number (the larger of
+  `retention.full` and `retention.days`). Restoring a new cluster from a backup is not wired up
+  yet either. Until then, archive failures show only in the database pods' logs and in
+  `pg_stat_archiver`, and a bucket that stops accepting writes lets WAL pile up on the primary's
+  disk.
 - **The PostgreSQL major version is fixed at creation.** Supported versions are 16, 17 and 18,
   and `spec.version` can't be changed afterwards - the API server rejects it. Pointing newer
   Postgres binaries at an older data directory doesn't work, and an in-place major-version

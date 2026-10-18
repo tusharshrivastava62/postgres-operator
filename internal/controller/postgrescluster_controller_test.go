@@ -17,7 +17,6 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	appsv1 "k8s.io/api/apps/v1"
-	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -62,10 +61,6 @@ var _ = Describe("PostgresCluster Controller", func() {
 						Resources: corev1.ResourceRequirements{
 							Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("512Mi")},
 						},
-						Backup: dbv1alpha1.BackupSpec{
-							Enabled:  true,
-							Schedule: nightlyCron,
-						},
 					},
 				}
 				Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
@@ -106,13 +101,6 @@ var _ = Describe("PostgresCluster Controller", func() {
 			Expect(k8sClient.Get(ctx, typeNamespacedName, sts)).To(Succeed())
 			Expect(*sts.Spec.Replicas).To(Equal(int32(1)))
 
-			By("creating the backup CronJob and its PVC")
-			backupNSName := types.NamespacedName{Name: resourceName + "-backup", Namespace: resourceNamespace}
-			cj := &batchv1.CronJob{}
-			Expect(k8sClient.Get(ctx, backupNSName, cj)).To(Succeed())
-			Expect(cj.Spec.Schedule).To(Equal(nightlyCron))
-			Expect(k8sClient.Get(ctx, backupNSName, &corev1.PersistentVolumeClaim{})).To(Succeed())
-
 			By("reporting status conditions - not yet available, no backup finished yet")
 			Expect(k8sClient.Get(ctx, typeNamespacedName, postgrescluster)).To(Succeed())
 			Expect(postgrescluster.Status.ObservedGeneration).To(Equal(postgrescluster.Generation))
@@ -121,28 +109,12 @@ var _ = Describe("PostgresCluster Controller", func() {
 			Expect(available.Status).To(Equal(metav1.ConditionFalse))
 			degraded := meta.FindStatusCondition(postgrescluster.Status.Conditions, "Degraded")
 			Expect(degraded).NotTo(BeNil())
-			Expect(degraded.Reason).To(Equal("BackupPending"))
+			Expect(degraded.Reason).To(Equal("BackupDisabled"))
+			Expect(degraded.Status).To(Equal(metav1.ConditionFalse))
 
 			By("recording reconcile metrics")
 			Expect(testutil.ToFloat64(reconcileTotal.WithLabelValues(resourceNamespace, resourceName, "success"))).To(BeNumerically(">=", 1))
 			Expect(testutil.ToFloat64(instancesReady.WithLabelValues(resourceNamespace, resourceName))).To(Equal(float64(0)))
-
-			By("removing the CronJob when backup is disabled")
-			Expect(k8sClient.Get(ctx, typeNamespacedName, postgrescluster)).To(Succeed())
-			postgrescluster.Spec.Backup.Enabled = false
-			Expect(k8sClient.Update(ctx, postgrescluster)).To(Succeed())
-
-			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
-			Expect(err).NotTo(HaveOccurred())
-			err = k8sClient.Get(ctx, backupNSName, cj)
-			Expect(errors.IsNotFound(err)).To(BeTrue())
-
-			By("reflecting disabled backup in status")
-			Expect(k8sClient.Get(ctx, typeNamespacedName, postgrescluster)).To(Succeed())
-			degraded = meta.FindStatusCondition(postgrescluster.Status.Conditions, "Degraded")
-			Expect(degraded).NotTo(BeNil())
-			Expect(degraded.Reason).To(Equal("BackupDisabled"))
-			Expect(degraded.Status).To(Equal(metav1.ConditionFalse))
 		})
 	})
 })

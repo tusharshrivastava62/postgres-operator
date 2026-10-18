@@ -30,7 +30,7 @@ const nightlyCron = "0 2 * * *"
 // or reconciler is involved, so these hold even when the webhook is down.
 var _ = Describe("PostgresCluster CRD backup fields", func() {
 	validDestination := func() *dbv1alpha1.BackupDestination {
-		return &dbv1alpha1.BackupDestination{Bucket: "acme-db-backups", CredentialsSecret: "backup-s3"}
+		return &dbv1alpha1.BackupDestination{Bucket: testBucket, CredentialsSecret: "backup-s3"}
 	}
 	newCluster := func(name string, mutate ...func(*dbv1alpha1.PostgresCluster)) *dbv1alpha1.PostgresCluster {
 		c := &dbv1alpha1.PostgresCluster{

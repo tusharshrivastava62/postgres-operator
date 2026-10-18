@@ -32,6 +32,10 @@ func validateBackup(cluster *dbv1alpha1.PostgresCluster, now time.Time) field.Er
 			"must be set when spec.backup.enabled is true: backups need somewhere to go"))
 	}
 
+	if backup.Enabled && backup.Destination != nil {
+		errs = append(errs, validateRegion(backupPath.Child("destination"), backup.Destination)...)
+	}
+
 	if backup.Verification.Enabled {
 		verifyPath := backupPath.Child("verification")
 		if !backup.Enabled {
@@ -46,6 +50,7 @@ func validateBackup(cluster *dbv1alpha1.PostgresCluster, now time.Time) field.Er
 
 	if recovery := recoveryOf(cluster); recovery != nil {
 		recoveryPath := field.NewPath("spec", "bootstrap", "recovery")
+		errs = append(errs, validateRegion(recoveryPath.Child("destination"), &recovery.Destination)...)
 		if recovery.TargetTime != nil && recovery.TargetTime.After(now) {
 			errs = append(errs, field.Invalid(recoveryPath.Child("targetTime"), recovery.TargetTime.UTC().Format(time.RFC3339),
 				"must not be in the future: no backup holds data from a time that has not happened yet"))
@@ -68,6 +73,17 @@ func validateBackup(cluster *dbv1alpha1.PostgresCluster, now time.Time) field.Er
 		}
 	}
 	return errs
+}
+
+// validateRegion requires a region for Amazon S3, where it cannot be worked
+// out from anywhere but the pod's own cloud metadata, which is absent
+// outside AWS. A store with its own endpoint has no use for one.
+func validateRegion(path *field.Path, dest *dbv1alpha1.BackupDestination) field.ErrorList {
+	if dest.Endpoint == "" && dest.Region == "" {
+		return field.ErrorList{field.Required(path.Child("region"),
+			"must be set for Amazon S3; leave it out only when endpoint names another S3-compatible store")}
+	}
+	return nil
 }
 
 func recoveryOf(cluster *dbv1alpha1.PostgresCluster) *dbv1alpha1.RecoverySpec {

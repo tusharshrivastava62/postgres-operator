@@ -140,6 +140,7 @@ func clusterSpecs() {
 	AfterAll(func() {
 		_, _ = kubectlOut("scale", "deployment", operatorDeployment, "-n", namespace, "--replicas=1")
 		_, _ = kubectlOut("delete", "namespace", clusterNamespace, "--wait=false")
+		stopObjectStore()
 	})
 
 	AfterEach(func() {
@@ -353,6 +354,64 @@ func clusterSpecs() {
 		count, err := strconv.Atoi(stored)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(count).To(BeNumerically(">=", result.acknowledged))
+	})
+
+	It("archives WAL and takes encrypted base backups to an object store, then keeps them across a failover", func() {
+		startObjectStore()
+		for name, data := range map[string][]string{
+			"backup-s3":  {"AWS_ACCESS_KEY_ID=" + objectStoreAccessKey, "AWS_SECRET_ACCESS_KEY=" + objectStoreSecretKey},
+			"backup-key": {"libsodium-key=" + strings.Repeat("0123456789abcdef", 4)},
+		} {
+			args := make([]string, 0, 4+len(data))
+			args = append(args, "create", "secret", "generic", name)
+			for _, kv := range data {
+				args = append(args, "--from-literal="+kv)
+			}
+			_, err := inCluster(args...)
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		By("turning backups on, which updates every pod")
+		patch := fmt.Sprintf(`{"spec":{"backup":{"enabled":true,"schedule":"*/2 * * * *",`+
+			`"destination":{"bucket":%q,"endpoint":%q,"forcePathStyle":true,"credentialsSecret":"backup-s3"},`+
+			`"encryption":{"keySecret":"backup-key"},"retention":{"full":2,"days":1}}}}`, backupBucket, objectStoreEndpoint)
+		_, err := inCluster("patch", "postgrescluster", clusterName, "--type=merge", "-p", patch)
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func(g Gomega) {
+			envs, err := inCluster("get", "pods", "-l", "app.kubernetes.io/component=postgres", "-o",
+				`jsonpath={range .items[*]}{.spec.containers[0].env[?(@.name=="USE_WALG_BACKUP")].value}{" "}{end}`)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(strings.Fields(envs)).To(HaveLen(instances))
+			g.Expect(strings.Fields(envs)).To(HaveEach("true"))
+			expectHealthy(g)
+		}, clusterUpTimeout+5*time.Minute, pollEvery).Should(Succeed())
+
+		By("finding a base backup in the bucket, read back with the key")
+		primary, err := clusterField(".status.primaryInstance")
+		Expect(err).NotTo(HaveOccurred())
+		list := `envdir /run/etc/wal-e.d/env wal-g backup-list 2>/dev/null | grep -c '^base_'`
+		Eventually(func(g Gomega) {
+			out, err := runInPod(primary, list)
+			g.Expect(err).NotTo(HaveOccurred())
+			count, err := strconv.Atoi(out)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(count).To(BeNumerically(">=", 1))
+		}, 6*time.Minute, pollEvery).Should(Succeed())
+
+		By("archiving WAL as it is produced")
+		_, err = psql(primary, "", "select pg_switch_wal()")
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func(g Gomega) {
+			out, err := psql(primary, "", "select archived_count > 0 from pg_stat_archiver")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(Equal("t"))
+		}, 2*time.Minute, pollEvery).Should(Succeed())
+
+		By("showing the new settings in the pod's backup environment, running as non-root")
+		out, err := runInPod(primary, `echo "$(id -u) $(cat /run/etc/wal-e.d/env/WALG_S3_PREFIX) `+
+			`$(cat /run/etc/wal-e.d/env/WALG_LIBSODIUM_KEY_TRANSFORM)"`)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(out).To(Equal("101 s3://" + backupBucket + "/" + clusterNamespace + "/" + clusterName + "/wal/17 hex"))
 	})
 
 	It("fails over when the primary is deleted, keeping the data and the service", func() {

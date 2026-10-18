@@ -13,6 +13,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -36,6 +37,9 @@ const (
 	pod2 = "c-2"
 )
 
+// testNow is the moment the planning table is evaluated at.
+var testNow = time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+
 // rp builds a rolloutPod for the table below: ready, not terminating.
 func rp(name string, ordinal int, revision string) rolloutPod {
 	return rolloutPod{name: name, ordinal: ordinal, revision: revision, ready: true}
@@ -47,7 +51,7 @@ var _ = Describe("Planning a rolling update", func() {
 	}
 	lags := map[string]int64{"c-0": 0, pod1: 0, pod2: 0}
 	plan := func(primary string, pods []rolloutPod, instances int32, healthy bool, lag map[string]int64) rolloutAction {
-		return planRollout(newRevision, primary, pods, instances, healthy, "replica c-1 is not streaming", lag)
+		return planRollout(testNow, newRevision, primary, pods, instances, healthy, "replica c-1 is not streaming", lag)
 	}
 
 	It("does nothing when every pod is on the current revision", func() {
@@ -55,7 +59,7 @@ var _ = Describe("Planning a rolling update", func() {
 	})
 
 	It("does nothing when no revision is known yet", func() {
-		got := planRollout("", "c-0", three(oldRevision, oldRevision, oldRevision), 3, true, "", lags)
+		got := planRollout(testNow, "", "c-0", three(oldRevision, oldRevision, oldRevision), 3, true, "", lags)
 		Expect(got.kind).To(Equal(rolloutNone))
 	})
 
@@ -140,6 +144,56 @@ var _ = Describe("Planning a rolling update", func() {
 		pods := three(oldRevision, oldRevision, newRevision)
 		pods[2].ready = false
 		Expect(plan("c-0", pods, 3, true, lags).kind).To(Equal(rolloutWait))
+	})
+
+	It("replaces an outdated pod that is not ready straight away, whatever the replication state", func() {
+		pods := three(oldRevision, oldRevision, oldRevision)
+		pods[2].ready = false
+		got := plan("c-0", pods, 3, false, lags)
+		Expect(got.kind).To(Equal(rolloutDeletePod))
+		Expect(got.pod).To(Equal(pod2))
+		Expect(got.message).To(ContainSubstring("outdated and not ready"))
+	})
+
+	It("replaces an outdated primary that is not ready too", func() {
+		pods := three(oldRevision, oldRevision, oldRevision)
+		pods[0].ready = false
+		got := plan("c-0", pods, 3, false, lags)
+		Expect(got.kind).To(Equal(rolloutDeletePod))
+		Expect(got.pod).To(Equal("c-0"))
+	})
+
+	It("still waits for a new-revision pod that has only just become unready", func() {
+		pods := three(oldRevision, oldRevision, newRevision)
+		pods[2].ready = false
+		pods[2].unreadySince = testNow.Add(-time.Minute)
+		Expect(plan("c-0", pods, 3, true, lags).kind).To(Equal(rolloutWait))
+	})
+
+	It("stops waiting for a new-revision pod that has been unready too long", func() {
+		pods := []rolloutPod{rp("c-0", 0, oldRevision), rp(pod1, 1, newRevision)}
+		pods[1].ready = false
+		pods[1].unreadySince = testNow.Add(-unreadyStuckAfter - time.Second)
+		got := plan("c-0", pods, 2, false, map[string]int64{})
+		Expect(got.kind).To(Equal(rolloutDeletePod), "no replica can take over, so the primary is replaced in place")
+		Expect(got.pod).To(Equal("c-0"))
+	})
+
+	It("does not replace the primary in place while a replica could take over", func() {
+		pods := three(oldRevision, newRevision, newRevision)
+		pods[2].ready = false
+		pods[2].unreadySince = testNow.Add(-time.Hour)
+		got := plan("c-0", pods, 3, false, map[string]int64{pod1: 0})
+		Expect(got.kind).To(Equal(rolloutSwitchover))
+		Expect(got.candidate).To(Equal(pod1))
+	})
+
+	It("takes no second replica down while one is stuck", func() {
+		pods := three(oldRevision, oldRevision, newRevision)
+		pods[2].ready = false
+		pods[2].unreadySince = testNow.Add(-time.Hour)
+		got := plan("c-0", pods, 3, false, map[string]int64{pod1: 0})
+		Expect(got.kind).To(Equal(rolloutSwitchover), "straight to the primary, leaving c-1 alone")
 	})
 
 	It("reads the pod ordinal from its name", func() {

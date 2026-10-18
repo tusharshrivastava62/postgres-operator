@@ -31,7 +31,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -43,12 +42,9 @@ import (
 // pods of a deleted cluster are gone.
 const leftoverRequeueDelay = 5 * time.Second
 
-// backupScript runs a full-cluster dump (all databases plus roles and other
-// global objects) and writes it, gzip-compressed, to the backup PVC with a
-// timestamped name so successive runs don't clobber each other.
-const backupScript = `set -eu
-pg_dumpall | gzip > "/backups/$(date -u +%Y%m%dT%H%M%SZ).sql.gz"
-`
+// backupSecretRecheckDelay is how soon to look again for a backup Secret that
+// is missing or malformed.
+const backupSecretRecheckDelay = 30 * time.Second
 
 // PostgresClusterReconciler reconciles a PostgresCluster object
 type PostgresClusterReconciler struct {
@@ -73,7 +69,6 @@ type PostgresClusterReconciler struct {
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
@@ -133,8 +128,22 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// a running cluster keeps running while the spec is wrong.
 	if !hasMemoryLimit(cluster) {
 		log.Info("not reconciling: spec.resources.limits.memory is required")
-		return ctrl.Result{}, r.markInvalidSpec(ctx, cluster,
+		return ctrl.Result{}, r.markInvalidSpec(ctx, cluster, "InvalidSpec",
 			"spec.resources.limits.memory is required: PostgreSQL sizes its memory from the container limit")
+	}
+
+	// Backups name Secrets that the pods read as environment variables. A pod
+	// whose Secret is missing cannot start, so a typo in a running cluster's
+	// spec would take every restarted member down. Check first, and change
+	// nothing until the Secrets are right. Nothing watches those Secrets, so
+	// look again after a while.
+	problem, err := r.backupSecretProblem(ctx, cluster)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("checking backup secrets: %w", err)
+	}
+	if problem != "" {
+		log.Info("not reconciling: " + problem)
+		return ctrl.Result{RequeueAfter: backupSecretRecheckDelay}, r.markInvalidSpec(ctx, cluster, "BackupSecretProblem", problem)
 	}
 
 	// A cluster that has never been reconciled has no status.image yet. Start
@@ -157,7 +166,7 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	image, ok := resolveImage(cluster)
 	if !ok {
-		return ctrl.Result{}, r.markInvalidSpec(ctx, cluster,
+		return ctrl.Result{}, r.markInvalidSpec(ctx, cluster, "InvalidSpec",
 			fmt.Sprintf("no default image for version %q and spec.image is not set", cluster.Spec.Version))
 	}
 	// Record the image before anything uses it, so that if the operator is
@@ -187,8 +196,8 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if err := r.reconcileStatefulSet(ctx, cluster, image); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling statefulset: %w", err)
 	}
-	if err := r.reconcileBackup(ctx, cluster); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling backup: %w", err)
+	if err := r.removeLegacyBackupCronJob(ctx, cluster); err != nil {
+		return ctrl.Result{}, fmt.Errorf("removing the old backup job: %w", err)
 	}
 	// Runs last and only on the happy path: status should reflect what the
 	// steps above actually converged to, not guess at partial progress from
@@ -261,13 +270,15 @@ func (r *PostgresClusterReconciler) reconcileDeleted(ctx context.Context, key ty
 }
 
 // markInvalidSpec reports a spec the reconciler will not act on as
-// Progressing=False with reason InvalidSpec, and does not return an error:
+// Progressing=False with the given reason, and does not return an error:
 // retrying cannot fix a spec, and a change to it triggers a new reconcile.
-func (r *PostgresClusterReconciler) markInvalidSpec(ctx context.Context, cluster *dbv1alpha1.PostgresCluster, message string) error {
+func (r *PostgresClusterReconciler) markInvalidSpec(
+	ctx context.Context, cluster *dbv1alpha1.PostgresCluster, reason, message string,
+) error {
 	changed := meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
 		Type:    "Progressing",
 		Status:  metav1.ConditionFalse,
-		Reason:  "InvalidSpec",
+		Reason:  reason,
 		Message: message,
 	})
 	if cluster.Status.ObservedGeneration != cluster.Generation {
@@ -363,193 +374,6 @@ func fillMissingCredentials(secret *corev1.Secret) error {
 	return nil
 }
 
-// reconcileBackup ensures the scheduled backup CronJob matches
-// spec.backup, creating it (and its destination PVC) when enabled and
-// removing it when not - so flipping backup.enabled off actually stops
-// the schedule instead of leaving a stale CronJob behind.
-//
-// There's no dedicated backup-storage field on the spec yet, so the
-// backup PVC reuses spec.storage.size as its own size. That's a
-// deliberately simple default for a single dev/small-prod cluster; a
-// cluster that needs a different backup retention footprint will need
-// its own size/destination field, which is a CRD change, not something
-// to guess at here.
-func (r *PostgresClusterReconciler) reconcileBackup(ctx context.Context, cluster *dbv1alpha1.PostgresCluster) error {
-	if !cluster.Spec.Backup.Enabled {
-		return r.deleteBackupCronJob(ctx, cluster)
-	}
-	if cluster.Spec.Backup.Schedule == "" {
-		return fmt.Errorf("backup.enabled is true but backup.schedule is empty")
-	}
-
-	if err := r.reconcileBackupPVC(ctx, cluster); err != nil {
-		return err
-	}
-
-	cj := &batchv1.CronJob{ObjectMeta: metav1.ObjectMeta{Name: backupName(cluster), Namespace: cluster.Namespace}}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, cj, func() error {
-		labels := labelsForCluster(cluster)
-		successHistory := int32(3)
-		failHistory := int32(3)
-		backoffLimit := int32(2)
-
-		cj.Labels = labels
-		cj.Spec.Schedule = cluster.Spec.Backup.Schedule
-		cj.Spec.ConcurrencyPolicy = batchv1.ForbidConcurrent
-		cj.Spec.SuccessfulJobsHistoryLimit = &successHistory
-		cj.Spec.FailedJobsHistoryLimit = &failHistory
-		cj.Spec.JobTemplate = batchv1.JobTemplateSpec{
-			ObjectMeta: metav1.ObjectMeta{Labels: labels},
-			Spec: batchv1.JobSpec{
-				BackoffLimit: &backoffLimit,
-				Template: corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Labels: labels},
-					Spec: corev1.PodSpec{
-						RestartPolicy: corev1.RestartPolicyOnFailure,
-						Containers: []corev1.Container{
-							{
-								Name:    "backup",
-								Image:   fmt.Sprintf("postgres:%s", cluster.Spec.Version),
-								Command: []string{"sh", "-c", backupScript},
-								Env: []corev1.EnvVar{
-									{Name: "PGHOST", Value: cluster.Name},
-									{Name: "PGPORT", Value: fmt.Sprintf("%d", postgresPort)},
-									{Name: "PGUSER", ValueFrom: secretKeyRef(cluster, secretKeyUsername)},
-									{Name: "PGPASSWORD", ValueFrom: secretKeyRef(cluster, secretKeyPassword)},
-								},
-								VolumeMounts: []corev1.VolumeMount{
-									{Name: backupVolumeName, MountPath: "/backups"},
-								},
-							},
-						},
-						Volumes: []corev1.Volume{
-							{
-								Name: backupVolumeName,
-								VolumeSource: corev1.VolumeSource{
-									PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: backupName(cluster)},
-								},
-							},
-						},
-					},
-				},
-			},
-		}
-		return controllerutil.SetControllerReference(cluster, cj, r.Scheme)
-	})
-	return err
-}
-
-func (r *PostgresClusterReconciler) deleteBackupCronJob(ctx context.Context, cluster *dbv1alpha1.PostgresCluster) error {
-	cj := &batchv1.CronJob{ObjectMeta: metav1.ObjectMeta{Name: backupName(cluster), Namespace: cluster.Namespace}}
-	err := r.Delete(ctx, cj)
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	return err
-}
-
-// reconcileBackupPVC ensures the backup destination volume exists. Like
-// the credentials Secret, this only creates it once: existing backups live
-// on this volume, so nothing here should ever delete or resize it out from
-// under a running schedule - including if backups are later disabled and
-// re-enabled.
-func (r *PostgresClusterReconciler) reconcileBackupPVC(ctx context.Context, cluster *dbv1alpha1.PostgresCluster) error {
-	existing := &corev1.PersistentVolumeClaim{}
-	err := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: backupName(cluster)}, existing)
-	if err == nil {
-		return nil
-	}
-	if !apierrors.IsNotFound(err) {
-		return err
-	}
-
-	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      backupName(cluster),
-			Namespace: cluster.Namespace,
-			Labels:    labelsForCluster(cluster),
-		},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-			Resources: corev1.VolumeResourceRequirements{
-				Requests: corev1.ResourceList{corev1.ResourceStorage: cluster.Spec.Storage.Size},
-			},
-			StorageClassName: cluster.Spec.Storage.StorageClassName,
-		},
-	}
-	if err := controllerutil.SetControllerReference(cluster, pvc, r.Scheme); err != nil {
-		return err
-	}
-	return r.Create(ctx, pvc)
-}
-
-// backupCondition reports backup health as a Degraded condition, driven by
-// the most recently finished Job the backup CronJob spawned. There's no
-// owner reference from PostgresCluster straight to those Jobs (they're
-// owned by the CronJob), so this finds them the same way the CronJob
-// controller's Pods find each other: by the labels the CronJob's JobTemplate
-// stamps on every Job it creates.
-func (r *PostgresClusterReconciler) backupCondition(ctx context.Context, cluster *dbv1alpha1.PostgresCluster) (metav1.Condition, error) {
-	condition := metav1.Condition{Type: "Degraded", Status: metav1.ConditionFalse}
-
-	if !cluster.Spec.Backup.Enabled {
-		condition.Reason = "BackupDisabled"
-		condition.Message = "scheduled backups are not enabled"
-		return condition, nil
-	}
-
-	jobs := &batchv1.JobList{}
-	if err := r.List(ctx, jobs, client.InNamespace(cluster.Namespace), client.MatchingLabels(labelsForCluster(cluster))); err != nil {
-		return metav1.Condition{}, err
-	}
-
-	var latest *batchv1.Job
-	for i := range jobs.Items {
-		job := &jobs.Items[i]
-		if !jobComplete(job) && !jobFailed(job) {
-			continue
-		}
-		if latest == nil || job.CreationTimestamp.After(latest.CreationTimestamp.Time) {
-			latest = job
-		}
-	}
-
-	switch {
-	case latest == nil:
-		condition.Reason = "BackupPending"
-		condition.Message = "no backup has finished yet"
-	case jobFailed(latest):
-		condition.Status = metav1.ConditionTrue
-		condition.Reason = "BackupFailed"
-		condition.Message = fmt.Sprintf("backup job %s failed", latest.Name)
-	default:
-		condition.Reason = "BackupHealthy"
-		condition.Message = fmt.Sprintf("last backup job %s completed successfully", latest.Name)
-		if latest.Status.CompletionTime != nil {
-			backupLastSuccessTimestampSeconds.WithLabelValues(cluster.Namespace, cluster.Name).
-				Set(float64(latest.Status.CompletionTime.Unix()))
-		}
-	}
-	return condition, nil
-}
-
-func jobComplete(job *batchv1.Job) bool {
-	return jobHasCondition(job, batchv1.JobComplete)
-}
-
-func jobFailed(job *batchv1.Job) bool {
-	return jobHasCondition(job, batchv1.JobFailed)
-}
-
-func jobHasCondition(job *batchv1.Job, condType batchv1.JobConditionType) bool {
-	for _, c := range job.Status.Conditions {
-		if c.Type == condType && c.Status == corev1.ConditionTrue {
-			return true
-		}
-	}
-	return false
-}
-
 func secretKeyRef(cluster *dbv1alpha1.PostgresCluster, key string) *corev1.EnvVarSource {
 	return &corev1.EnvVarSource{
 		SecretKeyRef: &corev1.SecretKeySelector{
@@ -576,7 +400,6 @@ func (r *PostgresClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&dbv1alpha1.PostgresCluster{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
-		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&batchv1.CronJob{}).
 		// The three objects the database pods authenticate to the API with,
 		// and the budget protecting them from drains: watched so that
