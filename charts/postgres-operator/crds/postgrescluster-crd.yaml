@@ -259,6 +259,22 @@ spec:
                         - bucket
                         - credentialsSecret
                         type: object
+                      encryption:
+                        description: |-
+                          encryption names the key the source's backups were encrypted with, if
+                          they were. It is independent of this cluster's own backup encryption.
+                        properties:
+                          keySecret:
+                            description: |-
+                              keySecret names a Secret in the cluster's namespace whose
+                              "libsodium-key" entry holds a 32-byte key written as 64 hexadecimal
+                              characters. The operator never creates or changes it.
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                        required:
+                        - keySecret
+                        type: object
                       sourceCluster:
                         description: sourceCluster is the name the backups were taken
                           under.

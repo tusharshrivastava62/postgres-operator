@@ -77,6 +77,15 @@ spec:
 `, clusterName, clusterNamespace, version, instances, imageLine)
 }
 
+// mainSelector selects the main cluster's objects, so scenarios that add other
+// clusters to the namespace do not count theirs.
+const mainSelector = "app.kubernetes.io/instance=" + clusterName
+
+// mainRole selects the main cluster's pods that Patroni has given a role.
+func mainRole(role string) string {
+	return mainSelector + ",db.youroperator.io/role=" + role
+}
+
 // operatorDeployment is the controller Deployment created by make deploy.
 const operatorDeployment = "postgres-operator-controller-manager"
 
@@ -188,8 +197,8 @@ func clusterSpecs() {
 		Eventually(func(g Gomega) { primary = currentPrimary(g) }, time.Minute, pollEvery).Should(Succeed())
 
 		By("labelling exactly that pod as the primary, and the rest as replicas")
-		Expect(podsOf("db.youroperator.io/role=primary")).To(ConsistOf(primary))
-		Expect(podsOf("db.youroperator.io/role=replica")).To(HaveLen(instances - 1))
+		Expect(podsOf(mainRole("primary"))).To(ConsistOf(primary))
+		Expect(podsOf(mainRole("replica"))).To(HaveLen(instances - 1))
 
 		By("pointing the read-write Service at the primary only")
 		ip, err := inCluster("get", "pod", primary, "-o", "jsonpath={.status.podIP}")
@@ -245,7 +254,7 @@ func clusterSpecs() {
 		Expect(err).NotTo(HaveOccurred())
 		writeThroughService(Default, primary, "first")
 
-		for _, replica := range podsOf("db.youroperator.io/role=replica") {
+		for _, replica := range podsOf(mainRole("replica")) {
 			Eventually(func(g Gomega) {
 				out, err := rowCount(replica, "")
 				g.Expect(err).NotTo(HaveOccurred())
@@ -440,6 +449,131 @@ func clusterSpecs() {
 		Expect(out).To(Equal("101 s3://" + backupBucket + "/" + clusterNamespace + "/" + clusterName + "/wal/17 hex"))
 	})
 
+	Context("restoring into a new cluster", Ordered, func() {
+		const (
+			restoredName = "restored"
+			latestName   = "restored-latest"
+			// The rows written by the first scenario, in the order they were written.
+			rowBeforeBackup = "before-backup"
+			rowBeforeTarget = "before-target"
+			rowAfterTarget  = "after-target"
+		)
+		var targetTime string
+
+		// restoreManifest is a one-instance cluster restored from the main cluster's
+		// backups, to targetTime when it is not empty.
+		restoreManifest := func(name, target string) string {
+			targetLine := ""
+			if target != "" {
+				targetLine = fmt.Sprintf("      targetTime: %q\n", target)
+			}
+			return fmt.Sprintf(`apiVersion: db.youroperator.io/v1alpha1
+kind: PostgresCluster
+metadata:
+  name: %[1]s
+  namespace: %[2]s
+spec:
+  version: "17"
+  instances: 1
+  storage:
+    size: 1Gi
+  resources:
+    limits:
+      memory: 1Gi
+  bootstrap:
+    recovery:
+      sourceCluster: %[3]s
+      destination:
+        bucket: %[4]s
+        endpoint: %[5]s
+        forcePathStyle: true
+        credentialsSecret: backup-s3
+      encryption:
+        keySecret: backup-key
+%[6]s`, name, clusterNamespace, clusterName, backupBucket, objectStoreEndpoint, targetLine)
+		}
+		waitAvailable := func(name string) {
+			Eventually(func(g Gomega) {
+				status, err := conditionOf(name, "Available")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(status).To(Equal("True"))
+			}, clusterUpTimeout, pollEvery).Should(Succeed())
+		}
+		rowsOf := func(pod string) []string {
+			out, err := psql(pod, "", "select v from pitr order by id")
+			Expect(err).NotTo(HaveOccurred())
+			return strings.Fields(out)
+		}
+
+		It("sets up a database with rows on both sides of a moment, and a backup before it", func() {
+			primary, err := clusterField(".status.primaryInstance")
+			Expect(err).NotTo(HaveOccurred())
+			_, err = psql(primary, "", "create table pitr (id serial primary key, v text)")
+			Expect(err).NotTo(HaveOccurred())
+			_, err = psql(primary, "", "insert into pitr(v) values ('"+rowBeforeBackup+"')")
+			Expect(err).NotTo(HaveOccurred())
+
+			By("taking a base backup now, as the schedule would")
+			_, err = runInPod(primary, `PGUSER=postgres envdir /run/etc/wal-e.d/env `+
+				`/scripts/postgres_backup.sh /home/postgres/pgdata/pgroot/data`)
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = psql(primary, "", "insert into pitr(v) values ('"+rowBeforeTarget+"')")
+			Expect(err).NotTo(HaveOccurred())
+			time.Sleep(2 * time.Second)
+			targetTime, err = psql(primary, "",
+				`select to_char(date_trunc('second', now() at time zone 'utc'), 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`)
+			Expect(err).NotTo(HaveOccurred())
+			time.Sleep(2 * time.Second)
+			_, err = psql(primary, "", "insert into pitr(v) values ('"+rowAfterTarget+"')")
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the WAL holding those rows to reach the bucket")
+			closed, err := psql(primary, "", "select pg_walfile_name(pg_switch_wal() - 1)")
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				out, err := psql(primary, "", fmt.Sprintf("select last_archived_wal >= '%s' from pg_stat_archiver", closed))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(Equal("t"))
+			}, 2*time.Minute, pollEvery).Should(Succeed())
+		})
+
+		It("restores a new cluster to the chosen moment, leaving the source as it was", func() {
+			Expect(targetTime).NotTo(BeEmpty())
+			_, err := kubectlIn(restoreManifest(restoredName, targetTime), "apply", "-f", "-")
+			Expect(err).NotTo(HaveOccurred())
+			waitAvailable(restoredName)
+
+			Expect(rowsOf(restoredName+"-0")).To(Equal([]string{rowBeforeBackup, rowBeforeTarget}),
+				"data from before the target time is there, data after it is not")
+
+			source, err := clusterField(".status.primaryInstance")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rowsOf(source)).To(Equal([]string{rowBeforeBackup, rowBeforeTarget, rowAfterTarget}))
+		})
+
+		It("gives the restored cluster its own passwords and its own place for backups", func() {
+			original, err := inCluster("get", "secret", clusterName+"-credentials", "-o", "jsonpath={.data.password}")
+			Expect(err).NotTo(HaveOccurred())
+			restored, err := inCluster("get", "secret", restoredName+"-credentials", "-o", "jsonpath={.data.password}")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(restored).NotTo(BeEmpty())
+			Expect(restored).NotTo(Equal(original))
+
+			By("logging in with the new password")
+			out, err := psql(restoredName+"-0", restoredName, "select count(*) from pitr")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out).To(Equal("2"))
+		})
+
+		It("restores to the latest moment when no time is given", func() {
+			_, err := kubectlIn(restoreManifest(latestName, ""), "apply", "-f", "-")
+			Expect(err).NotTo(HaveOccurred())
+			waitAvailable(latestName)
+			Expect(rowsOf(latestName + "-0")).To(Equal([]string{rowBeforeBackup, rowBeforeTarget, rowAfterTarget}))
+		})
+	})
+
 	It("fails over when the primary is deleted, keeping the data and the service", func() {
 		old := ""
 		Eventually(func(g Gomega) { old = currentPrimary(g) }).Should(Succeed())
@@ -495,7 +629,7 @@ func clusterSpecs() {
 		_, err = runInPod(old, thaw)
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(expectHealthy, clusterUpTimeout, pollEvery).Should(Succeed())
-		Expect(podsOf("db.youroperator.io/role=primary")).To(ConsistOf(fresh))
+		Expect(podsOf(mainRole("primary"))).To(ConsistOf(fresh))
 	})
 
 	It("fails over with the operator stopped, then catches its status up when it returns", func() {
@@ -545,13 +679,13 @@ func clusterSpecs() {
 
 		By("removing the pods and what Patroni left behind, but keeping the volumes and the Secret")
 		Eventually(func() (string, error) {
-			return inCluster("get", "pods", "-o", "name")
+			return inCluster("get", "pods", "-l", mainSelector, "-o", "name")
 		}, 3*time.Minute, pollEvery).Should(BeEmpty())
 		leftovers := "app.kubernetes.io/instance=" + clusterName + ",app.kubernetes.io/component=postgres"
 		Eventually(func() (string, error) {
 			return inCluster("get", "endpoints,configmaps", "-l", leftovers, "-o", "name")
 		}, time.Minute, pollEvery).Should(BeEmpty())
-		volumes, err := inCluster("get", "pvc", "-o", "name")
+		volumes, err := inCluster("get", "pvc", "-l", mainSelector, "-o", "name")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(strings.Fields(volumes)).To(HaveLen(instances))
 		_, err = inCluster("get", "secret", clusterName+"-credentials")

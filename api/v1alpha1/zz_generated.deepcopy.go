@@ -288,6 +288,11 @@ func (in *PostgresClusterStatus) DeepCopy() *PostgresClusterStatus {
 func (in *RecoverySpec) DeepCopyInto(out *RecoverySpec) {
 	*out = *in
 	out.Destination = in.Destination
+	if in.Encryption != nil {
+		in, out := &in.Encryption, &out.Encryption
+		*out = new(BackupEncryption)
+		**out = **in
+	}
 	if in.TargetTime != nil {
 		in, out := &in.TargetTime, &out.TargetTime
 		*out = (*in).DeepCopy()

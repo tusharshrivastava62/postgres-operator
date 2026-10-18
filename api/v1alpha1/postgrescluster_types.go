@@ -297,6 +297,11 @@ type RecoverySpec struct {
 	// +kubebuilder:validation:Required
 	Destination BackupDestination `json:"destination"`
 
+	// encryption names the key the source's backups were encrypted with, if
+	// they were. It is independent of this cluster's own backup encryption.
+	// +optional
+	Encryption *BackupEncryption `json:"encryption,omitempty"`
+
 	// targetTime restores to this moment instead of the latest. It is a
 	// timestamp with a time zone.
 	// +optional

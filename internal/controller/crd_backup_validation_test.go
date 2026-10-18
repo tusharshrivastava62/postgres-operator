@@ -94,7 +94,7 @@ var _ = Describe("PostgresCluster CRD backup fields", func() {
 		Entry("an https endpoint", "crd-dest-https", func(d *dbv1alpha1.BackupDestination) { d.Endpoint = "https://s3.example.com:9000" }, true, ""),
 		Entry("an endpoint that is not http", "crd-dest-ftp", func(d *dbv1alpha1.BackupDestination) { d.Endpoint = "ftp://s3.example.com" }, false, "endpoint"),
 		Entry("an endpoint with a space", "crd-dest-space", func(d *dbv1alpha1.BackupDestination) { d.Endpoint = "http://s3 example.com" }, false, "endpoint"),
-		Entry("a nested path", "crd-dest-path", func(d *dbv1alpha1.BackupDestination) { d.Path = "team/orders-db" }, true, ""),
+		Entry("a nested path", "crd-dest-path", func(d *dbv1alpha1.BackupDestination) { d.Path = teamPath }, true, ""),
 		Entry("a path with a leading slash", "crd-dest-lead", func(d *dbv1alpha1.BackupDestination) { d.Path = "/team" }, false, "path"),
 		Entry("a path with a trailing slash", "crd-dest-trail", func(d *dbv1alpha1.BackupDestination) { d.Path = "team/" }, false, "path"),
 		Entry("a path that climbs", "crd-dest-up", func(d *dbv1alpha1.BackupDestination) { d.Path = "team/../other" }, false, "path"),
@@ -186,6 +186,17 @@ var _ = Describe("PostgresCluster CRD backup fields", func() {
 			err := create(c)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("sourceCluster"))
+		})
+
+		It("rejects a source encryption block with no key secret", func() {
+			c := newCluster("crd-recovery-noenckey", func(c *dbv1alpha1.PostgresCluster) {
+				c.Spec.Bootstrap = &dbv1alpha1.BootstrapSpec{Recovery: &dbv1alpha1.RecoverySpec{
+					SourceCluster: "orders-old", Destination: *validDestination(), Encryption: &dbv1alpha1.BackupEncryption{},
+				}}
+			})
+			err := create(c)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("keySecret"))
 		})
 
 		It("cannot be changed after creation", func() {

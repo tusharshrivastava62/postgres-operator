@@ -26,6 +26,9 @@ import (
 )
 
 const (
+	// keyTransformHex tells wal-g that a libsodium key is written as hexadecimal.
+	keyTransformHex = "hex"
+
 	// envTrue is the value of the boolean environment variables Spilo and wal-g read.
 	envTrue = "true"
 
@@ -106,7 +109,7 @@ func backupEnv(cluster *dbv1alpha1.PostgresCluster) []corev1.EnvVar {
 			corev1.EnvVar{Name: "WALG_LIBSODIUM_KEY", ValueFrom: secretRef(backup.Encryption.KeySecret, secretKeyEncKey)},
 			// The key is written as 64 hexadecimal characters. Without this
 			// wal-g would take the characters themselves as the key bytes.
-			corev1.EnvVar{Name: "WALG_LIBSODIUM_KEY_TRANSFORM", Value: "hex"})
+			corev1.EnvVar{Name: "WALG_LIBSODIUM_KEY_TRANSFORM", Value: keyTransformHex})
 	}
 	return env
 }
@@ -117,45 +120,63 @@ func secretRef(name, key string) *corev1.EnvVarSource {
 	}}
 }
 
-// backupSecretProblem describes what is wrong with the Secrets the backup
-// settings name, or returns "" when they are usable. A Secret that cannot be
-// read at all is an error to retry; one that is absent or malformed is the
-// user's to fix.
+// backupSecretProblem describes what is wrong with the Secrets the backup and
+// restore settings name, or returns "" when they are usable. A Secret that
+// cannot be read at all is an error to retry; one that is absent or malformed
+// is the user's to fix.
 func (r *PostgresClusterReconciler) backupSecretProblem(ctx context.Context, cluster *dbv1alpha1.PostgresCluster) (string, error) {
 	backup := cluster.Spec.Backup
-	if !backup.Enabled || backup.Destination == nil {
-		return "", nil
+	if backup.Enabled && backup.Destination != nil {
+		if problem, err := r.credentialsProblem(ctx, cluster.Namespace, "backup", backup.Destination.CredentialsSecret); problem != "" || err != nil {
+			return problem, err
+		}
+		if backup.Encryption != nil {
+			if problem, err := r.encryptionKeyProblem(ctx, cluster.Namespace, "backup", backup.Encryption.KeySecret); problem != "" || err != nil {
+				return problem, err
+			}
+		}
 	}
+	if recovery := cluster.Spec.Recovery(); recovery != nil {
+		if problem, err := r.credentialsProblem(ctx, cluster.Namespace, "restore", recovery.Destination.CredentialsSecret); problem != "" || err != nil {
+			return problem, err
+		}
+		if recovery.Encryption != nil {
+			if problem, err := r.encryptionKeyProblem(ctx, cluster.Namespace, "restore", recovery.Encryption.KeySecret); problem != "" || err != nil {
+				return problem, err
+			}
+		}
+	}
+	return "", nil
+}
 
+func (r *PostgresClusterReconciler) credentialsProblem(ctx context.Context, namespace, purpose, name string) (string, error) {
 	creds := &corev1.Secret{}
-	err := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: backup.Destination.CredentialsSecret}, creds)
+	err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, creds)
 	if apierrors.IsNotFound(err) {
-		return fmt.Sprintf("the backup credentials Secret %q does not exist in namespace %s",
-			backup.Destination.CredentialsSecret, cluster.Namespace), nil
+		return fmt.Sprintf("the %s credentials Secret %q does not exist in namespace %s", purpose, name, namespace), nil
 	}
 	if err != nil {
 		return "", err
 	}
 	for _, key := range []string{secretKeyAccessKey, secretKeySecretKey} {
 		if len(creds.Data[key]) == 0 {
-			return fmt.Sprintf("the backup credentials Secret %q has no %s entry", creds.Name, key), nil
+			return fmt.Sprintf("the %s credentials Secret %q has no %s entry", purpose, name, key), nil
 		}
 	}
+	return "", nil
+}
 
-	if backup.Encryption != nil {
-		enc := &corev1.Secret{}
-		err := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: backup.Encryption.KeySecret}, enc)
-		if apierrors.IsNotFound(err) {
-			return fmt.Sprintf("the backup encryption Secret %q does not exist in namespace %s",
-				backup.Encryption.KeySecret, cluster.Namespace), nil
-		}
-		if err != nil {
-			return "", err
-		}
-		if !hexKey.Match(enc.Data[secretKeyEncKey]) {
-			return fmt.Sprintf("the %s entry of Secret %q must be 64 hexadecimal characters (a 32-byte key)",
-				secretKeyEncKey, enc.Name), nil
-		}
+func (r *PostgresClusterReconciler) encryptionKeyProblem(ctx context.Context, namespace, purpose, name string) (string, error) {
+	enc := &corev1.Secret{}
+	err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, enc)
+	if apierrors.IsNotFound(err) {
+		return fmt.Sprintf("the %s encryption Secret %q does not exist in namespace %s", purpose, name, namespace), nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if !hexKey.Match(enc.Data[secretKeyEncKey]) {
+		return fmt.Sprintf("the %s entry of Secret %q must be 64 hexadecimal characters (a 32-byte key)", secretKeyEncKey, name), nil
 	}
 	return "", nil
 }
@@ -194,7 +215,56 @@ func walgClientEnv(cluster *dbv1alpha1.PostgresCluster) []corev1.EnvVar {
 	if backup.Encryption != nil {
 		env = append(env,
 			corev1.EnvVar{Name: "WALG_LIBSODIUM_KEY", ValueFrom: secretRef(backup.Encryption.KeySecret, secretKeyEncKey)},
-			corev1.EnvVar{Name: "WALG_LIBSODIUM_KEY_TRANSFORM", Value: "hex"})
+			corev1.EnvVar{Name: "WALG_LIBSODIUM_KEY_TRANSFORM", Value: keyTransformHex})
+	}
+	return env
+}
+
+// targetTimeLayout is how Spilo's restore script wants a recovery target: an
+// ISO timestamp with an explicit offset ("+00:00", not "Z").
+const targetTimeLayout = "2006-01-02T15:04:05.999999-07:00"
+
+// recoveryEnv makes Spilo create the cluster from another cluster's backups
+// instead of an empty database. These are the CLONE_ variants of the settings
+// backupEnv uses for the cluster's own backups, and they apply only while
+// the data directory is being created: Spilo ignores them for a cluster that
+// already has data, so they are harmless to leave in the pod afterwards.
+//
+// The source's prefix is written out in full, built the same way the source
+// built it, so a restore does not depend on Spilo's namespace-based default.
+func recoveryEnv(cluster *dbv1alpha1.PostgresCluster) []corev1.EnvVar {
+	recovery := cluster.Spec.Recovery()
+	if recovery == nil {
+		return nil
+	}
+	dest := &recovery.Destination
+	sourceNamespace := recovery.SourceNamespace
+	if sourceNamespace == "" {
+		sourceNamespace = cluster.Namespace
+	}
+	env := []corev1.EnvVar{
+		{Name: "CLONE_METHOD", Value: "CLONE_WITH_WALG"},
+		{Name: "CLONE_SCOPE", Value: recovery.SourceCluster},
+		{Name: "CLONE_WALG_S3_PREFIX", Value: backupPrefix(dest, sourceNamespace, recovery.SourceCluster, cluster.Spec.Version)},
+		{Name: "CLONE_AWS_ACCESS_KEY_ID", ValueFrom: secretRef(dest.CredentialsSecret, secretKeyAccessKey)},
+		{Name: "CLONE_AWS_SECRET_ACCESS_KEY", ValueFrom: secretRef(dest.CredentialsSecret, secretKeySecretKey)},
+	}
+	if dest.Region != "" {
+		env = append(env, corev1.EnvVar{Name: "CLONE_AWS_REGION", Value: dest.Region})
+	}
+	if dest.Endpoint != "" {
+		env = append(env,
+			corev1.EnvVar{Name: "CLONE_AWS_ENDPOINT", Value: dest.Endpoint},
+			corev1.EnvVar{Name: "CLONE_WALG_S3_ENDPOINT", Value: walgEndpoint(dest)},
+			corev1.EnvVar{Name: "CLONE_WALG_DISABLE_S3_SSE", Value: envTrue})
+	}
+	if recovery.Encryption != nil {
+		env = append(env,
+			corev1.EnvVar{Name: "CLONE_WALG_LIBSODIUM_KEY", ValueFrom: secretRef(recovery.Encryption.KeySecret, secretKeyEncKey)},
+			corev1.EnvVar{Name: "CLONE_WALG_LIBSODIUM_KEY_TRANSFORM", Value: keyTransformHex})
+	}
+	if recovery.TargetTime != nil {
+		env = append(env, corev1.EnvVar{Name: "CLONE_TARGET_TIME", Value: recovery.TargetTime.UTC().Format(targetTimeLayout)})
 	}
 	return env
 }

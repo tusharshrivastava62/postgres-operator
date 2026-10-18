@@ -103,7 +103,7 @@ func spiloEnv(cluster *dbv1alpha1.PostgresCluster) ([]corev1.EnvVar, error) {
 	if err != nil {
 		return nil, err
 	}
-	backup := backupEnv(cluster)
+	backup := append(backupEnv(cluster), recoveryEnv(cluster)...)
 	env := make([]corev1.EnvVar, 0, 16+len(backup))
 	env = append(env, []corev1.EnvVar{
 		{Name: "SCOPE", Value: cluster.Name},

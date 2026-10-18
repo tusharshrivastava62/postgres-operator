@@ -292,6 +292,10 @@ func (r *PostgresClusterReconciler) reconcileStatus(ctx context.Context, cluster
 		} else {
 			failover.Reason = "Bootstrapping"
 			failover.Message = "waiting for the first primary"
+			if recovery := cluster.Spec.Recovery(); recovery != nil {
+				failover.Message = fmt.Sprintf("restoring from the backups of %s, then waiting for the first primary",
+					recovery.SourceCluster)
+			}
 		}
 	}
 

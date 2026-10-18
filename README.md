@@ -56,6 +56,11 @@ Apply that, and the operator's reconcile loop takes it from there.
   A cluster that archives into another's path is refused rather than overwriting it.
   Every 10 minutes a small job reads the bucket back, reports what it finds, and deletes backups
   that are past `retention` (at least `full` of them are kept, and every one newer than `days`).
+- **Restores into a new cluster, never in place.** Set `spec.bootstrap.recovery` on a new
+  cluster to create it from another cluster's backups, to the latest moment or to a
+  `targetTime`. The source is only read. The new cluster gets its own passwords and writes its
+  own backups to its own path, and the API refuses a cluster that would archive into the path it
+  was restored from. It needs the same PostgreSQL major version as the source.
 - **Reports real status.** `.status.primaryInstance` names the pod holding the leader lock,
   taken from Patroni's own record rather than a pod label that can go stale on a hung primary,
   and `.status.replicationLagBytes` gives each streaming replica's lag. `.status.conditions`
@@ -116,12 +121,11 @@ Apply that, and the operator's reconcile loop takes it from there.
   (about 2 seconds of refused writes), then the old primary. A new revision that cannot start
   stops the rollout after the first replica. A single-instance cluster has nobody to hand over
   to, so its pod is simply replaced.
-- **Restoring is not wired up yet.** Backups are taken, read back, reported and pruned, but
-  creating a new cluster from one (`spec.bootstrap.recovery`) and the scheduled restore test
-  (`spec.backup.verification`) are accepted by the API and not acted on yet. A bucket that stops
-  accepting writes still lets WAL pile up on the primary's disk until it is fixed: archiving
-  lag is reported (`WALArchivingHealthy`, `postgrescluster_wal_archive_lag_bytes`), so alert on
-  it.
+- **Scheduled restore testing is not wired up yet.** `spec.backup.verification` is accepted
+  by the API and not acted on, so nothing yet proves on a schedule that the newest backup
+  restores. A bucket that stops accepting writes lets WAL pile up on the primary's disk until it
+  is fixed: archiving lag is reported (`WALArchivingHealthy`,
+  `postgrescluster_wal_archive_lag_bytes`), so alert on it.
 - **The PostgreSQL major version is fixed at creation.** Supported versions are 16, 17 and 18,
   and `spec.version` can't be changed afterwards - the API server rejects it. Pointing newer
   Postgres binaries at an older data directory doesn't work, and an in-place major-version

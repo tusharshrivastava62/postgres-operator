@@ -32,3 +32,12 @@ func (d *BackupDestination) SameStore(other *BackupDestination) bool {
 	}
 	return d.Bucket == other.Bucket && d.Endpoint == other.Endpoint && d.Region == other.Region
 }
+
+// Recovery returns the backups the cluster is restored from, or nil for a
+// cluster that starts empty.
+func (s *PostgresClusterSpec) Recovery() *RecoverySpec {
+	if s.Bootstrap == nil {
+		return nil
+	}
+	return s.Bootstrap.Recovery
+}

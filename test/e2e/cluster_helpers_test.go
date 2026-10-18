@@ -157,3 +157,13 @@ func parseWriterLog(log string) writerResult {
 	}
 	return res
 }
+
+// clusterFieldOf is clusterField for a PostgresCluster other than the main one.
+func clusterFieldOf(name, path string) (string, error) {
+	return inCluster("get", "postgrescluster", name, "-o", "jsonpath={"+path+"}")
+}
+
+// conditionOf is conditionStatus for another PostgresCluster.
+func conditionOf(name, conditionType string) (string, error) {
+	return clusterFieldOf(name, fmt.Sprintf(".status.conditions[?(@.type==%q)].status", conditionType))
+}

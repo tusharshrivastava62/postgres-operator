@@ -48,7 +48,7 @@ func validateBackup(cluster *dbv1alpha1.PostgresCluster, now time.Time) field.Er
 		}
 	}
 
-	if recovery := recoveryOf(cluster); recovery != nil {
+	if recovery := cluster.Spec.Recovery(); recovery != nil {
 		recoveryPath := field.NewPath("spec", "bootstrap", "recovery")
 		errs = append(errs, validateRegion(recoveryPath.Child("destination"), &recovery.Destination)...)
 		if recovery.TargetTime != nil && recovery.TargetTime.After(now) {
@@ -84,13 +84,6 @@ func validateRegion(path *field.Path, dest *dbv1alpha1.BackupDestination) field.
 			"must be set for Amazon S3; leave it out only when endpoint names another S3-compatible store")}
 	}
 	return nil
-}
-
-func recoveryOf(cluster *dbv1alpha1.PostgresCluster) *dbv1alpha1.RecoverySpec {
-	if cluster.Spec.Bootstrap == nil {
-		return nil
-	}
-	return cluster.Spec.Bootstrap.Recovery
 }
 
 // backupWarnings returns advice about backup settings that are allowed but

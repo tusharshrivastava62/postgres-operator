@@ -26,6 +26,8 @@ spec:
         bucket: my-database-backups
         region: eu-west-1
         credentialsSecret: backup-s3
+      encryption:          # only if the source's backups were encrypted
+        keySecret: backup-key
       targetTime: "2026-10-18T07:49:27Z"    # leave out to restore to the latest
   backup:
     enabled: true

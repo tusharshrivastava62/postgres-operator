@@ -13,6 +13,7 @@ package controller
 import (
 	"context"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -36,6 +37,12 @@ const testBucket = "acme-db-backups"
 // testRegion is the region the backup specs use.
 const testRegion = "eu-west-1"
 
+// Names shared by the backup and restore specs.
+const (
+	sourceName = "orders"
+	teamPath   = "team/orders-db"
+)
+
 const validHexKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 func envMap(env []corev1.EnvVar) map[string]corev1.EnvVar {
@@ -48,7 +55,7 @@ func envMap(env []corev1.EnvVar) map[string]corev1.EnvVar {
 
 func backupCluster() *dbv1alpha1.PostgresCluster {
 	return &dbv1alpha1.PostgresCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "prod"},
+		ObjectMeta: metav1.ObjectMeta{Name: sourceName, Namespace: "prod"},
 		Spec: dbv1alpha1.PostgresClusterSpec{
 			Version: "17",
 			Backup: dbv1alpha1.BackupSpec{
@@ -85,7 +92,7 @@ var _ = Describe("The backup environment", func() {
 
 	It("uses the path from the spec when there is one", func() {
 		c := backupCluster()
-		c.Spec.Backup.Destination.Path = "team/orders-db"
+		c.Spec.Backup.Destination.Path = teamPath
 		Expect(envMap(backupEnv(c))["WALG_S3_PREFIX"].Value).To(Equal("s3://acme-db-backups/team/orders-db/wal/17"))
 	})
 
@@ -128,7 +135,7 @@ var _ = Describe("The backup environment", func() {
 		c.Spec.Backup.Encryption = &dbv1alpha1.BackupEncryption{KeySecret: "backup-key"}
 		env := envMap(backupEnv(c))
 		Expect(env["WALG_LIBSODIUM_KEY"].ValueFrom.SecretKeyRef.Name).To(Equal("backup-key"))
-		Expect(env["WALG_LIBSODIUM_KEY"].ValueFrom.SecretKeyRef.Key).To(Equal("libsodium-key"))
+		Expect(env["WALG_LIBSODIUM_KEY"].ValueFrom.SecretKeyRef.Key).To(Equal(secretKeyEncKey))
 		Expect(env["WALG_LIBSODIUM_KEY_TRANSFORM"].Value).To(Equal("hex"))
 	})
 
@@ -157,6 +164,103 @@ func mustEnv(c *dbv1alpha1.PostgresCluster) []corev1.EnvVar {
 	Expect(err).NotTo(HaveOccurred())
 	return env
 }
+
+func recoveryCluster() *dbv1alpha1.PostgresCluster {
+	c := &dbv1alpha1.PostgresCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders-restored", Namespace: "prod"},
+		Spec: dbv1alpha1.PostgresClusterSpec{
+			Version: "17",
+			Bootstrap: &dbv1alpha1.BootstrapSpec{Recovery: &dbv1alpha1.RecoverySpec{
+				SourceCluster: sourceName,
+				Destination:   dbv1alpha1.BackupDestination{Bucket: testBucket, Region: testRegion, CredentialsSecret: "source-s3"},
+			}},
+		},
+	}
+	return c
+}
+
+var _ = Describe("The recovery environment", func() {
+	env := func(c *dbv1alpha1.PostgresCluster) map[string]corev1.EnvVar { return envMap(recoveryEnv(c)) }
+
+	It("is empty for a cluster that starts empty", func() {
+		Expect(recoveryEnv(backupCluster())).To(BeEmpty())
+	})
+
+	It("asks Spilo to clone from the source's backups", func() {
+		e := env(recoveryCluster())
+		Expect(e["CLONE_METHOD"].Value).To(Equal("CLONE_WITH_WALG"))
+		Expect(e["CLONE_SCOPE"].Value).To(Equal("orders"))
+	})
+
+	It("names the source's storage prefix exactly as the source built it", func() {
+		Expect(env(recoveryCluster())["CLONE_WALG_S3_PREFIX"].Value).To(Equal("s3://acme-db-backups/prod/orders/wal/17"))
+	})
+
+	It("takes the source's namespace and path into account", func() {
+		c := recoveryCluster()
+		c.Spec.Bootstrap.Recovery.SourceNamespace = "staging"
+		Expect(env(c)["CLONE_WALG_S3_PREFIX"].Value).To(Equal("s3://acme-db-backups/staging/orders/wal/17"))
+		c.Spec.Bootstrap.Recovery.Destination.Path = teamPath
+		Expect(env(c)["CLONE_WALG_S3_PREFIX"].Value).To(Equal("s3://acme-db-backups/team/orders-db/wal/17"))
+	})
+
+	It("reads the source's credentials from the named Secret", func() {
+		e := env(recoveryCluster())
+		for _, name := range []string{"CLONE_AWS_ACCESS_KEY_ID", "CLONE_AWS_SECRET_ACCESS_KEY"} {
+			Expect(e[name].Value).To(BeEmpty())
+			Expect(e[name].ValueFrom.SecretKeyRef.Name).To(Equal("source-s3"))
+		}
+		Expect(e["CLONE_AWS_ACCESS_KEY_ID"].ValueFrom.SecretKeyRef.Key).To(Equal(secretKeyAccessKey))
+		Expect(e["CLONE_AWS_REGION"].Value).To(Equal(testRegion))
+	})
+
+	It("addresses a custom endpoint and switches off server-side encryption, as for backups", func() {
+		c := recoveryCluster()
+		c.Spec.Bootstrap.Recovery.Destination.Endpoint = "http://s3:8333"
+		c.Spec.Bootstrap.Recovery.Destination.ForcePathStyle = true
+		e := env(c)
+		Expect(e["CLONE_AWS_ENDPOINT"].Value).To(Equal("http://s3:8333"))
+		Expect(e["CLONE_WALG_S3_ENDPOINT"].Value).To(Equal("http+path://s3:8333"))
+		Expect(e["CLONE_WALG_DISABLE_S3_SSE"].Value).To(Equal("true"))
+	})
+
+	It("passes the source's encryption key, as hex", func() {
+		c := recoveryCluster()
+		c.Spec.Bootstrap.Recovery.Encryption = &dbv1alpha1.BackupEncryption{KeySecret: "source-key"}
+		e := env(c)
+		Expect(e["CLONE_WALG_LIBSODIUM_KEY"].ValueFrom.SecretKeyRef.Name).To(Equal("source-key"))
+		Expect(e["CLONE_WALG_LIBSODIUM_KEY_TRANSFORM"].Value).To(Equal("hex"))
+	})
+
+	It("sets no target time, so the latest is restored, unless one is given", func() {
+		Expect(env(recoveryCluster())).NotTo(HaveKey("CLONE_TARGET_TIME"))
+	})
+
+	DescribeTable("the target time, with an explicit offset as the restore script requires",
+		func(given time.Time, want string) {
+			c := recoveryCluster()
+			t := metav1.NewTime(given)
+			c.Spec.Bootstrap.Recovery.TargetTime = &t
+			Expect(env(c)["CLONE_TARGET_TIME"].Value).To(Equal(want))
+		},
+		Entry("UTC", time.Date(2026, 10, 18, 7, 49, 27, 0, time.UTC), "2026-10-18T07:49:27+00:00"),
+		Entry("another zone, converted to UTC", time.Date(2026, 10, 18, 9, 49, 27, 0, time.FixedZone("CEST", 2*3600)), "2026-10-18T07:49:27+00:00"),
+	)
+
+	It("is part of the pod environment alongside the cluster's own backup settings", func() {
+		c := recoveryCluster()
+		c.Spec.Backup = backupCluster().Spec.Backup
+		e := envMap(mustEnv(c))
+		Expect(e).To(HaveKey("CLONE_METHOD"))
+		Expect(e).To(HaveKey("USE_WALG_BACKUP"))
+		Expect(e["WALG_S3_PREFIX"].Value).To(Equal("s3://acme-db-backups/prod/orders-restored/wal/17"),
+			"its own backups go to its own path, never the source's")
+	})
+
+	It("is present even when the restored cluster takes no backups of its own", func() {
+		Expect(envMap(mustEnv(recoveryCluster()))).To(HaveKey("CLONE_METHOD"))
+	})
+})
 
 var _ = Describe("Backups through the reconciler", func() {
 	const namespace = "default"
@@ -239,7 +343,7 @@ var _ = Describe("Backups through the reconciler", func() {
 	It("rejects an encryption key that is not 64 hexadecimal characters", func() {
 		const name = "bk-badkey"
 		createSecret(name+"-s3", goodCreds)
-		createSecret(name+"-key", map[string]string{"libsodium-key": "not-hex"})
+		createSecret(name+"-key", map[string]string{secretKeyEncKey: "not-hex"})
 		newCluster(name, func(c *dbv1alpha1.PostgresCluster) {
 			c.Spec.Backup.Encryption = &dbv1alpha1.BackupEncryption{KeySecret: name + "-key"}
 		})
@@ -251,12 +355,69 @@ var _ = Describe("Backups through the reconciler", func() {
 	It("accepts a good encryption key and passes it on", func() {
 		const name = "bk-goodkey"
 		createSecret(name+"-s3", goodCreds)
-		createSecret(name+"-key", map[string]string{"libsodium-key": validHexKey})
+		createSecret(name+"-key", map[string]string{secretKeyEncKey: validHexKey})
 		newCluster(name, func(c *dbv1alpha1.PostgresCluster) {
 			c.Spec.Backup.Encryption = &dbv1alpha1.BackupEncryption{KeySecret: name + "-key"}
 		})
 		reconcileOnce(name)
 		Expect(stsEnv(name)["WALG_LIBSODIUM_KEY_TRANSFORM"].Value).To(Equal("hex"))
+	})
+
+	It("waits, changing nothing, while the restore credentials Secret does not exist", func() {
+		const name = "bk-restore-nosecret"
+		newCluster(name, func(c *dbv1alpha1.PostgresCluster) {
+			c.Spec.Backup = dbv1alpha1.BackupSpec{}
+			c.Spec.Bootstrap = &dbv1alpha1.BootstrapSpec{Recovery: &dbv1alpha1.RecoverySpec{
+				SourceCluster: sourceName,
+				Destination:   dbv1alpha1.BackupDestination{Bucket: testBucket, Region: testRegion, CredentialsSecret: name + "-src"},
+			}}
+		})
+		reconcileOnce(name)
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, key(name), &appsv1.StatefulSet{}))).To(BeTrue())
+		cond := progressing(name)
+		Expect(cond.Reason).To(Equal("BackupSecretProblem"))
+		Expect(cond.Message).To(ContainSubstring("restore credentials"))
+	})
+
+	It("checks the restore encryption key too", func() {
+		const name = "bk-restore-badkey"
+		createSecret(name+"-src", goodCreds)
+		createSecret(name+"-srckey", map[string]string{secretKeyEncKey: "short"})
+		newCluster(name, func(c *dbv1alpha1.PostgresCluster) {
+			c.Spec.Backup = dbv1alpha1.BackupSpec{}
+			c.Spec.Bootstrap = &dbv1alpha1.BootstrapSpec{Recovery: &dbv1alpha1.RecoverySpec{
+				SourceCluster: sourceName,
+				Destination:   dbv1alpha1.BackupDestination{Bucket: testBucket, Region: testRegion, CredentialsSecret: name + "-src"},
+				Encryption:    &dbv1alpha1.BackupEncryption{KeySecret: name + "-srckey"},
+			}}
+		})
+		reconcileOnce(name)
+		Expect(progressing(name).Message).To(ContainSubstring("restore"))
+		Expect(progressing(name).Message).To(ContainSubstring("64 hexadecimal"))
+	})
+
+	It("creates a cluster that restores from the source's backups, and says so while it waits", func() {
+		const name = "bk-restore-ok"
+		createSecret(name+"-src", goodCreds)
+		newCluster(name, func(c *dbv1alpha1.PostgresCluster) {
+			c.Spec.Backup = dbv1alpha1.BackupSpec{}
+			c.Spec.Bootstrap = &dbv1alpha1.BootstrapSpec{Recovery: &dbv1alpha1.RecoverySpec{
+				SourceCluster: sourceName,
+				Destination:   dbv1alpha1.BackupDestination{Bucket: testBucket, Region: testRegion, CredentialsSecret: name + "-src"},
+			}}
+		})
+		reconcileOnce(name)
+
+		env := stsEnv(name)
+		Expect(env["CLONE_METHOD"].Value).To(Equal("CLONE_WITH_WALG"))
+		Expect(env["CLONE_WALG_S3_PREFIX"].Value).To(Equal("s3://acme-db-backups/default/orders/wal/16"))
+		Expect(env).NotTo(HaveKey("USE_WALG_BACKUP"))
+
+		c := &dbv1alpha1.PostgresCluster{}
+		Expect(k8sClient.Get(ctx, key(name), c)).To(Succeed())
+		failover := meta.FindStatusCondition(c.Status.Conditions, "FailoverInProgress")
+		Expect(failover.Reason).To(Equal("Bootstrapping"))
+		Expect(failover.Message).To(ContainSubstring("restoring from the backups of orders"))
 	})
 
 	It("does not ask for any Secret when backups are off", func() {
