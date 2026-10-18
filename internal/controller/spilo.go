@@ -25,6 +25,12 @@ import (
 )
 
 const (
+	// dropAllCapabilities is the Linux capability set dropped from every container.
+	dropAllCapabilities corev1.Capability = "ALL"
+
+	// scriptVolumeName is the volume the operator-owned jobs read their script from.
+	scriptVolumeName = "script"
+
 	postgresPort          int32 = 5432
 	patroniPort           int32 = 8008
 	postgresPortName            = "postgres"
@@ -211,7 +217,7 @@ func desiredStatefulSet(cluster *dbv1alpha1.PostgresCluster, image string) (*app
 						},
 						SecurityContext: &corev1.SecurityContext{
 							AllowPrivilegeEscalation: ptr.To(false),
-							Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+							Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{dropAllCapabilities}},
 						},
 						Env:       env,
 						Resources: cluster.Spec.Resources,

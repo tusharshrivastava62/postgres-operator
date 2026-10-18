@@ -34,7 +34,7 @@ func clusterForObject(_ context.Context, obj client.Object) []reconcile.Request 
 	labels := obj.GetLabels()
 	component := labels[labelAppComponent]
 	if labels[labelAppName] != appNameValue || labels[labelAppInstance] == "" ||
-		(component != componentPostgres && component != componentBackupStatus) {
+		(component != componentPostgres && component != componentBackupStatus && component != componentRestoreVerify) {
 		return nil
 	}
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{

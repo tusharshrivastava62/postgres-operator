@@ -199,8 +199,8 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if err := r.removeLegacyBackupCronJob(ctx, cluster); err != nil {
 		return ctrl.Result{}, fmt.Errorf("removing the old backup job: %w", err)
 	}
-	if err := r.reconcileBackupStatusJob(ctx, cluster, image); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling the backup status job: %w", err)
+	if err := r.reconcileBackupJobs(ctx, cluster, image); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling the backup jobs: %w", err)
 	}
 	// Runs last and only on the happy path: status should reflect what the
 	// steps above actually converged to, not guess at partial progress from

@@ -237,13 +237,21 @@ var _ = Describe("Reading the backup report", func() {
 	})
 
 	Describe("the stored status", func() {
-		It("keeps the restore-test fields when it refreshes the rest", func() {
-			cluster := &dbv1alpha1.PostgresCluster{Spec: dbv1alpha1.PostgresClusterSpec{Backup: dailySpec}}
+		It("keeps the last restore test when there is no newer one, and refreshes the rest", func() {
+			spec := dailySpec
+			spec.Verification = dbv1alpha1.BackupVerification{Enabled: true, Schedule: "0 4 * * 0"}
+			cluster := &dbv1alpha1.PostgresCluster{Spec: dbv1alpha1.PostgresClusterSpec{Backup: spec}}
 			cluster.Status.Backup.Verification.Message = "kept"
-			updated, changed := mergeBackupStatus(cluster, evaluateBackup(dailySpec, freshReport(), evalNow.Add(-time.Minute), evalNow))
+			updated, changed := mergeBackupStatus(cluster, evaluateBackup(spec, freshReport(), evalNow.Add(-time.Minute), evalNow))
 			Expect(changed).To(BeTrue())
 			Expect(updated.Verification.Message).To(Equal("kept"))
 			Expect(updated.LastBackupName).To(Equal("base_0A"))
+		})
+		It("clears the restore test when verification is turned off", func() {
+			cluster := &dbv1alpha1.PostgresCluster{Spec: dbv1alpha1.PostgresClusterSpec{Backup: dailySpec}}
+			cluster.Status.Backup.Verification.Message = "old failure"
+			updated, _ := mergeBackupStatus(cluster, evaluateBackup(dailySpec, freshReport(), evalNow.Add(-time.Minute), evalNow))
+			Expect(updated.Verification).To(Equal(dbv1alpha1.VerificationStatus{}))
 		})
 		It("keeps the last known backups when the bucket could not be read, and still updates the archiver", func() {
 			cluster := &dbv1alpha1.PostgresCluster{Spec: dbv1alpha1.PostgresClusterSpec{Backup: dailySpec}}
@@ -515,7 +523,7 @@ var _ = Describe("Backup status through the reconciler", func() {
 	setup := func(name string, enabled bool) {
 		secret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Name: name + "-s3", Namespace: namespace},
-			StringData: map[string]string{secretKeyAccessKey: "id", secretKeySecretKey: "secret"},
+			StringData: map[string]string{secretKeyAccessKey: "id", secretKeySecretKey: testSecretValue},
 		}
 		ExpectWithOffset(1, k8sClient.Create(ctx, secret)).To(Succeed())
 		DeferCleanup(func() { ExpectWithOffset(1, client.IgnoreNotFound(k8sClient.Delete(ctx, secret))).To(Succeed()) })
@@ -576,15 +584,16 @@ var _ = Describe("Backup status through the reconciler", func() {
 		Expect(k8sClient.Get(ctx, key(name+"-backup-status"), cj)).To(Succeed())
 		Expect(cj.Spec.Schedule).To(Equal(backupStatusSchedule))
 		script := &corev1.ConfigMap{}
-		Expect(k8sClient.Get(ctx, key(name+"-backup-status"), script)).To(Succeed())
+		Expect(k8sClient.Get(ctx, key(name+"-backup-scripts"), script)).To(Succeed())
 		Expect(script.Data["backup_status.py"]).To(Equal(backupStatusScript))
+		Expect(script.Data["restore_verify.py"]).To(Equal(restoreVerifyScript))
 
 		c := get(name)
 		c.Spec.Backup.Enabled = false
 		Expect(k8sClient.Update(ctx, c)).To(Succeed())
 		reconcileOnce(name)
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, key(name+"-backup-status"), &batchv1.CronJob{}))).To(BeTrue())
-		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, key(name+"-backup-status"), &corev1.ConfigMap{}))).To(BeTrue())
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, key(name+"-backup-scripts"), &corev1.ConfigMap{}))).To(BeTrue())
 	})
 
 	It("creates nothing for a cluster without backups", func() {

@@ -61,6 +61,12 @@ Apply that, and the operator's reconcile loop takes it from there.
   `targetTime`. The source is only read. The new cluster gets its own passwords and writes its
   own backups to its own path, and the API refuses a cluster that would archive into the path it
   was restored from. It needs the same PostgreSQL major version as the source.
+- **Proves its backups restore.** With `backup.verification` on, a weekly (or any schedule)
+  job restores the newest base backup into scratch space, starts PostgreSQL on a local socket
+  that nothing else can reach, lets it replay the archived WAL, reads every database, and
+  records how long that took in `.status.backup.verification.durationSeconds`: the measured
+  time to recover. The `RestoreVerified` condition and a failed test in `Degraded` say whether
+  it passed.
 - **Reports real status.** `.status.primaryInstance` names the pod holding the leader lock,
   taken from Patroni's own record rather than a pod label that can go stale on a hung primary,
   and `.status.replicationLagBytes` gives each streaming replica's lag. `.status.conditions`
@@ -84,7 +90,8 @@ Apply that, and the operator's reconcile loop takes it from there.
   cluster: `postgrescluster_reconcile_total`, `_reconcile_duration_seconds`, `_instances_ready`,
   `_backup_last_success_timestamp_seconds`, `_has_primary`, `_primary_changes_total` and
   `_replication_lag_bytes` (per replica), `_backup_count`, `_backup_last_size_bytes` and
-  `_wal_archive_lag_bytes`. A deleted cluster's series are dropped.
+  `_wal_archive_lag_bytes`, `_restore_verification_last_success_timestamp_seconds` and
+  `_restore_verification_duration_seconds`. A deleted cluster's series are dropped.
 - **Cleans up automatically.** Nearly every resource the operator creates is owner-referenced
   to the `PostgresCluster`, so deleting the custom resource deletes it; the exceptions are the
   data and backup volumes and the credentials `Secret` (see below). The `Endpoints` and
@@ -121,11 +128,12 @@ Apply that, and the operator's reconcile loop takes it from there.
   (about 2 seconds of refused writes), then the old primary. A new revision that cannot start
   stops the rollout after the first replica. A single-instance cluster has nobody to hand over
   to, so its pod is simply replaced.
-- **Scheduled restore testing is not wired up yet.** `spec.backup.verification` is accepted
-  by the API and not acted on, so nothing yet proves on a schedule that the newest backup
-  restores. A bucket that stops accepting writes lets WAL pile up on the primary's disk until it
-  is fixed: archiving lag is reported (`WALArchivingHealthy`,
-  `postgrescluster_wal_archive_lag_bytes`), so alert on it.
+- **A bucket that stops accepting writes lets WAL pile up on the primary's disk** until it is
+  fixed. Archiving lag is reported (`WALArchivingHealthy`,
+  `postgrescluster_wal_archive_lag_bytes`), so alert on it, and size the data volume for an outage.
+- **A restore test needs scratch space as large as the database.** Its pod writes the restored
+  data to an `emptyDir` capped at `spec.storage.size`, so the node needs that much ephemeral
+  storage while it runs.
 - **The PostgreSQL major version is fixed at creation.** Supported versions are 16, 17 and 18,
   and `spec.version` can't be changed afterwards - the API server rejects it. Pointing newer
   Postgres binaries at an older data directory doesn't work, and an in-place major-version

@@ -38,8 +38,15 @@ import (
 //go:embed scripts/backup_status.py
 var backupStatusScript string
 
+// restoreVerifyScript restores the newest backup into scratch space and checks
+// it; see the file.
+//
+//go:embed scripts/restore_verify.py
+var restoreVerifyScript string
+
 const (
-	componentBackupStatus = "backup-status"
+	componentBackupStatus  = "backup-status"
+	componentRestoreVerify = "restore-verify"
 	// statusContainerName is the container of the status check pod.
 	statusContainerName = "status"
 
@@ -69,41 +76,83 @@ func backupStatusName(cluster *dbv1alpha1.PostgresCluster) string {
 	return cluster.Name + "-backup-status"
 }
 
+func restoreVerifyName(cluster *dbv1alpha1.PostgresCluster) string {
+	return cluster.Name + "-restore-verify"
+}
+
+// backupScriptsName is the ConfigMap holding the scripts both jobs run.
+func backupScriptsName(cluster *dbv1alpha1.PostgresCluster) string {
+	return cluster.Name + "-backup-scripts"
+}
+
 func backupStatusLabels(cluster *dbv1alpha1.PostgresCluster) map[string]string {
+	return labelsWithComponent(cluster, componentBackupStatus)
+}
+
+func restoreVerifyLabels(cluster *dbv1alpha1.PostgresCluster) map[string]string {
+	return labelsWithComponent(cluster, componentRestoreVerify)
+}
+
+func labelsWithComponent(cluster *dbv1alpha1.PostgresCluster, component string) map[string]string {
 	labels := labelsForCluster(cluster)
-	labels[labelAppComponent] = componentBackupStatus
+	labels[labelAppComponent] = component
 	return labels
 }
 
-// reconcileBackupStatusJob keeps the CronJob that reads the backups back
-// when backups are on, and removes it when they are not.
-func (r *PostgresClusterReconciler) reconcileBackupStatusJob(
+// reconcileBackupJobs keeps the two CronJobs that watch over backups, and the
+// ConfigMap of scripts they run: the status check, which exists while backups
+// are on, and the restore test, which exists while it is turned on too.
+func (r *PostgresClusterReconciler) reconcileBackupJobs(
 	ctx context.Context, cluster *dbv1alpha1.PostgresCluster, image string,
 ) error {
-	meta := metav1.ObjectMeta{Name: backupStatusName(cluster), Namespace: cluster.Namespace}
-	if !cluster.Spec.Backup.Enabled || cluster.Spec.Backup.Destination == nil {
-		if err := r.Delete(ctx, &batchv1.CronJob{ObjectMeta: meta}); client.IgnoreNotFound(err) != nil {
-			return err
+	backup := cluster.Spec.Backup
+	on := backup.Enabled && backup.Destination != nil
+	scripts := metav1.ObjectMeta{Name: backupScriptsName(cluster), Namespace: cluster.Namespace}
+	statusMeta := metav1.ObjectMeta{Name: backupStatusName(cluster), Namespace: cluster.Namespace}
+	verifyMeta := metav1.ObjectMeta{Name: restoreVerifyName(cluster), Namespace: cluster.Namespace}
+
+	if !on {
+		for _, obj := range []client.Object{
+			&batchv1.CronJob{ObjectMeta: statusMeta}, &batchv1.CronJob{ObjectMeta: verifyMeta}, &corev1.ConfigMap{ObjectMeta: scripts},
+		} {
+			if err := client.IgnoreNotFound(r.Delete(ctx, obj)); err != nil {
+				return err
+			}
 		}
-		return client.IgnoreNotFound(r.Delete(ctx, &corev1.ConfigMap{ObjectMeta: meta}))
+		return nil
 	}
 
-	script := &corev1.ConfigMap{ObjectMeta: meta}
-	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, script, func() error {
-		script.Labels = backupStatusLabels(cluster)
-		script.Data = map[string]string{"backup_status.py": backupStatusScript}
-		return controllerutil.SetControllerReference(cluster, script, r.Scheme)
+	cm := &corev1.ConfigMap{ObjectMeta: scripts}
+	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
+		cm.Labels = backupStatusLabels(cluster)
+		cm.Data = map[string]string{
+			"backup_status.py":  backupStatusScript,
+			"restore_verify.py": restoreVerifyScript,
+		}
+		return controllerutil.SetControllerReference(cluster, cm, r.Scheme)
 	}); err != nil {
 		return fmt.Errorf("script ConfigMap: %w", err)
 	}
 
-	cj := &batchv1.CronJob{ObjectMeta: meta}
-	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, cj, func() error {
-		cj.Labels = backupStatusLabels(cluster)
-		cj.Spec = backupStatusCronJobSpec(cluster, image)
-		return controllerutil.SetControllerReference(cluster, cj, r.Scheme)
+	status := &batchv1.CronJob{ObjectMeta: statusMeta}
+	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, status, func() error {
+		status.Labels = backupStatusLabels(cluster)
+		status.Spec = backupStatusCronJobSpec(cluster, image)
+		return controllerutil.SetControllerReference(cluster, status, r.Scheme)
 	}); err != nil {
-		return fmt.Errorf("CronJob: %w", err)
+		return fmt.Errorf("status CronJob: %w", err)
+	}
+
+	if !backup.Verification.Enabled {
+		return client.IgnoreNotFound(r.Delete(ctx, &batchv1.CronJob{ObjectMeta: verifyMeta}))
+	}
+	verify := &batchv1.CronJob{ObjectMeta: verifyMeta}
+	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, verify, func() error {
+		verify.Labels = restoreVerifyLabels(cluster)
+		verify.Spec = restoreVerifyCronJobSpec(cluster, image)
+		return controllerutil.SetControllerReference(cluster, verify, r.Scheme)
+	}); err != nil {
+		return fmt.Errorf("restore test CronJob: %w", err)
 	}
 	return nil
 }
@@ -158,7 +207,7 @@ func backupStatusCronJobSpec(cluster *dbv1alpha1.PostgresCluster, image string) 
 							Env:             env,
 							SecurityContext: &corev1.SecurityContext{
 								AllowPrivilegeEscalation: ptr.To(false),
-								Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+								Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{dropAllCapabilities}},
 							},
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
@@ -167,12 +216,12 @@ func backupStatusCronJobSpec(cluster *dbv1alpha1.PostgresCluster, image string) 
 								},
 								Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")},
 							},
-							VolumeMounts: []corev1.VolumeMount{{Name: "script", MountPath: "/scripts", ReadOnly: true}},
+							VolumeMounts: []corev1.VolumeMount{{Name: scriptVolumeName, MountPath: "/scripts", ReadOnly: true}},
 						}},
 						Volumes: []corev1.Volume{{
-							Name: "script",
+							Name: scriptVolumeName,
 							VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-								LocalObjectReference: corev1.LocalObjectReference{Name: backupStatusName(cluster)},
+								LocalObjectReference: corev1.LocalObjectReference{Name: backupScriptsName(cluster)},
 							}},
 						}},
 					},
@@ -210,16 +259,17 @@ type backupRef struct {
 	SizeBytes int64     `json:"sizeBytes"`
 }
 
-// latestBackupReport finds the newest finished run of the status script and
-// reads its result. It returns nil when no run has finished yet. Pods are used
-// rather than Jobs because the result lives on the pod, and reading it needs
-// no more permission than the operator already has.
-func (r *PostgresClusterReconciler) latestBackupReport(
-	ctx context.Context, cluster *dbv1alpha1.PostgresCluster,
-) (*backupReport, time.Time, error) {
+// latestTermination finds the newest finished run among the pods carrying the
+// given labels and returns its termination message and finish time, or an empty
+// message when none has finished. Pods are used rather than Jobs because the
+// result lives on the pod, and reading it needs no more permission than the
+// operator already has.
+func (r *PostgresClusterReconciler) latestTermination(
+	ctx context.Context, cluster *dbv1alpha1.PostgresCluster, labels map[string]string,
+) (string, time.Time, error) {
 	pods := &corev1.PodList{}
-	if err := r.List(ctx, pods, client.InNamespace(cluster.Namespace), client.MatchingLabels(backupStatusLabels(cluster))); err != nil {
-		return nil, time.Time{}, err
+	if err := r.List(ctx, pods, client.InNamespace(cluster.Namespace), client.MatchingLabels(labels)); err != nil {
+		return "", time.Time{}, err
 	}
 	var newest *corev1.ContainerStateTerminated
 	for i := range pods.Items {
@@ -234,13 +284,25 @@ func (r *PostgresClusterReconciler) latestBackupReport(
 		}
 	}
 	if newest == nil {
-		return nil, time.Time{}, nil
+		return "", time.Time{}, nil
+	}
+	return newest.Message, newest.FinishedAt.Time, nil
+}
+
+// latestBackupReport reads the newest finished run of the status script. It
+// returns nil when no run has finished yet.
+func (r *PostgresClusterReconciler) latestBackupReport(
+	ctx context.Context, cluster *dbv1alpha1.PostgresCluster,
+) (*backupReport, time.Time, error) {
+	message, finishedAt, err := r.latestTermination(ctx, cluster, backupStatusLabels(cluster))
+	if err != nil || message == "" {
+		return nil, time.Time{}, err
 	}
 	report := &backupReport{}
-	if err := json.Unmarshal([]byte(newest.Message), report); err != nil {
+	if err := json.Unmarshal([]byte(message), report); err != nil {
 		report = &backupReport{Errors: []string{"the backup status report could not be read"}}
 	}
-	return report, newest.FinishedAt.Time, nil
+	return report, finishedAt, nil
 }
 
 // backupEvaluation is what a report means.
@@ -250,7 +312,9 @@ type backupEvaluation struct {
 	// report. A part the run could not read is left as it was, not blanked.
 	hasBackups  bool
 	hasArchiver bool
-	conditions  []metav1.Condition
+	// verification is the newest finished restore test, if there is one.
+	verification *verifyOutcome
+	conditions   []metav1.Condition
 	// retentionFailed is set when the run could not delete expired backups.
 	retentionFailed bool
 }

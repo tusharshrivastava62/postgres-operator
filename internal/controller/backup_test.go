@@ -34,6 +34,9 @@ import (
 // testBucket is the bucket name the backup specs use.
 const testBucket = "acme-db-backups"
 
+// testSecretValue is a stand-in secret access key.
+const testSecretValue = "secret"
+
 // testRegion is the region the backup specs use.
 const testRegion = "eu-west-1"
 
@@ -296,7 +299,7 @@ var _ = Describe("Backups through the reconciler", func() {
 		ExpectWithOffset(1, k8sClient.Create(ctx, secret)).To(Succeed())
 		DeferCleanup(func() { ExpectWithOffset(1, client.IgnoreNotFound(k8sClient.Delete(ctx, secret))).To(Succeed()) })
 	}
-	goodCreds := map[string]string{secretKeyAccessKey: "id", secretKeySecretKey: "secret"}
+	goodCreds := map[string]string{secretKeyAccessKey: "id", secretKeySecretKey: testSecretValue}
 	progressing := func(name string) *metav1.Condition {
 		c := &dbv1alpha1.PostgresCluster{}
 		ExpectWithOffset(1, k8sClient.Get(ctx, key(name), c)).To(Succeed())

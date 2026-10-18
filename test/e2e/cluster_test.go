@@ -574,6 +574,38 @@ spec:
 		})
 	})
 
+	It("proves that the newest backup restores, and reports how long it took", func() {
+		By("turning restore testing on")
+		_, err := inCluster("patch", "postgrescluster", clusterName, "--type=merge",
+			"-p", `{"spec":{"backup":{"verification":{"enabled":true,"schedule":"0 4 * * 0"}}}}`)
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func() error {
+			_, err := inCluster("get", "cronjob", clusterName+"-restore-verify")
+			return err
+		}, 2*time.Minute, pollEvery).Should(Succeed())
+
+		By("running one now, without waiting for the schedule")
+		_, err = inCluster("create", "job", "manual-verify", "--from=cronjob/"+clusterName+"-restore-verify")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _, _ = inCluster("delete", "job", "manual-verify", "--wait=false") })
+
+		Eventually(func(g Gomega) {
+			status, err := conditionStatus("RestoreVerified")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(status).To(Equal("True"), "RestoreVerified")
+			succeeded, err := clusterField(".status.backup.verification.lastSuccessTime")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(succeeded).NotTo(BeEmpty())
+			degraded, err := conditionStatus("Degraded")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(degraded).To(Equal("False"))
+		}, 15*time.Minute, pollEvery).Should(Succeed())
+
+		duration, err := clusterField(".status.backup.verification.durationSeconds")
+		Expect(err).NotTo(HaveOccurred())
+		AddReportEntry("restore test", fmt.Sprintf("restored the newest backup in %s seconds", duration))
+	})
+
 	It("fails over when the primary is deleted, keeping the data and the service", func() {
 		old := ""
 		Eventually(func(g Gomega) { old = currentPrimary(g) }).Should(Succeed())

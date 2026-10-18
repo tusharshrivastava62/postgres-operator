@@ -80,6 +80,16 @@ var (
 		Help: "Bytes of WAL the primary has written that have not been archived, as of the last backup status check.",
 	}, []string{labelNamespace, labelName})
 
+	restoreVerificationLastSuccess = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "postgrescluster_restore_verification_last_success_timestamp_seconds",
+		Help: "Unix timestamp of the last restore test that passed.",
+	}, []string{labelNamespace, labelName})
+
+	restoreVerificationDuration = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "postgrescluster_restore_verification_duration_seconds",
+		Help: "How long the last passing restore test took: the measured time to recover.",
+	}, []string{labelNamespace, labelName})
+
 	replicationLagBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "postgrescluster_replication_lag_bytes",
 		Help: "Bytes of WAL each streaming replica is behind the primary. A replica that is not streaming has no series.",
@@ -98,5 +108,7 @@ func init() {
 		backupCount,
 		backupLastSizeBytes,
 		walArchiveLagBytes,
+		restoreVerificationLastSuccess,
+		restoreVerificationDuration,
 	)
 }

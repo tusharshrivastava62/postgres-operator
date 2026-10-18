@@ -327,18 +327,7 @@ func (r *PostgresClusterReconciler) reconcileStatus(ctx context.Context, cluster
 	for _, c := range []metav1.Condition{progressing, replication, failover, degraded} {
 		changed = meta.SetStatusCondition(&cluster.Status.Conditions, c) || changed
 	}
-	if cluster.Spec.Backup.Enabled {
-		for _, c := range backupEval.conditions {
-			changed = meta.SetStatusCondition(&cluster.Status.Conditions, c) || changed
-		}
-	} else {
-		changed = meta.RemoveStatusCondition(&cluster.Status.Conditions, conditionBackupHealthy) || changed
-		changed = meta.RemoveStatusCondition(&cluster.Status.Conditions, conditionWALArchivingHealthy) || changed
-	}
-	if updated, ok := mergeBackupStatus(cluster, backupEval); ok {
-		cluster.Status.Backup = updated
-		changed = true
-	}
+	changed = applyBackupStatus(cluster, backupEval) || changed
 	if cluster.Status.PrimaryInstance != obs.primary {
 		cluster.Status.PrimaryInstance = obs.primary
 		changed = true
@@ -434,6 +423,8 @@ func (r *PostgresClusterReconciler) forgetMetrics(key client.ObjectKey) {
 	backupCount.DeletePartialMatch(match)
 	backupLastSizeBytes.DeletePartialMatch(match)
 	walArchiveLagBytes.DeletePartialMatch(match)
+	restoreVerificationLastSuccess.DeletePartialMatch(match)
+	restoreVerificationDuration.DeletePartialMatch(match)
 	r.lastPrimary.Delete(key.Namespace + "/" + key.Name)
 }
 
@@ -460,18 +451,27 @@ func (r *PostgresClusterReconciler) evaluateBackupNow(
 	if report != nil {
 		recordBackupMetrics(cluster, eval.status)
 	}
+	if cluster.Spec.Backup.Verification.Enabled {
+		outcome, err := r.latestVerification(ctx, cluster)
+		if err != nil {
+			return backupEvaluation{}, err
+		}
+		eval.verification = outcome
+		eval.conditions = append(eval.conditions, verificationCondition(cluster.Spec.Backup.Verification, outcome, time.Now()))
+		recordVerificationMetrics(cluster, mergeVerification(cluster.Status.Backup.Verification, outcome))
+	}
 	return eval, nil
 }
 
 // mergeBackupStatus returns the status.backup to store and whether it differs
 // from what is stored. Each part is refreshed only when the report carried it:
 // a run that could not read the bucket still has the archiver to report, and
-// must not wipe the last known backups. The restore-test fields belong to a
-// different writer and are kept.
+// must not wipe the last known backups. The restore-test fields come from the
+// newest finished test, and stay as they were when there is none.
 func mergeBackupStatus(cluster *dbv1alpha1.PostgresCluster, eval backupEvaluation) (dbv1alpha1.BackupStatus, bool) {
 	current := cluster.Status.Backup
 	if !cluster.Spec.Backup.Enabled {
-		cleared := dbv1alpha1.BackupStatus{Verification: current.Verification}
+		cleared := dbv1alpha1.BackupStatus{}
 		return cleared, !equality.Semantic.DeepEqual(current, cleared)
 	}
 	updated := current
@@ -484,6 +484,11 @@ func mergeBackupStatus(cluster *dbv1alpha1.PostgresCluster, eval backupEvaluatio
 	}
 	if eval.hasArchiver {
 		updated.WALArchiving = eval.status.WALArchiving
+	}
+	if cluster.Spec.Backup.Verification.Enabled {
+		updated.Verification = mergeVerification(current.Verification, eval.verification)
+	} else {
+		updated.Verification = dbv1alpha1.VerificationStatus{}
 	}
 	return updated, !equality.Semantic.DeepEqual(current, updated)
 }
@@ -499,7 +504,9 @@ func degradedCondition(cluster *dbv1alpha1.PostgresCluster, eval backupEvaluatio
 	var problems []string
 	allUnknown := len(eval.conditions) > 0
 	for _, c := range eval.conditions {
-		if c.Status != metav1.ConditionUnknown {
+		// Only the backup and archiving conditions say whether the status
+		// check has reported; a restore test result does not.
+		if c.Type != conditionRestoreVerified && c.Status != metav1.ConditionUnknown {
 			allUnknown = false
 		}
 		if c.Status == metav1.ConditionFalse {
@@ -519,4 +526,27 @@ func degradedCondition(cluster *dbv1alpha1.PostgresCluster, eval backupEvaluatio
 	}
 	return metav1.Condition{Type: conditionDegraded, Status: metav1.ConditionFalse,
 		Reason: "BackupHealthy", Message: "backups and WAL archiving are healthy"}
+}
+
+// applyBackupStatus writes the backup conditions and status.backup into the
+// cluster, reporting whether anything changed. The conditions for a part that
+// is switched off are removed, not left to go stale.
+func applyBackupStatus(cluster *dbv1alpha1.PostgresCluster, eval backupEvaluation) bool {
+	changed := false
+	if cluster.Spec.Backup.Enabled {
+		for _, c := range eval.conditions {
+			changed = meta.SetStatusCondition(&cluster.Status.Conditions, c) || changed
+		}
+	} else {
+		changed = meta.RemoveStatusCondition(&cluster.Status.Conditions, conditionBackupHealthy) || changed
+		changed = meta.RemoveStatusCondition(&cluster.Status.Conditions, conditionWALArchivingHealthy) || changed
+	}
+	if !cluster.Spec.Backup.Enabled || !cluster.Spec.Backup.Verification.Enabled {
+		changed = meta.RemoveStatusCondition(&cluster.Status.Conditions, conditionRestoreVerified) || changed
+	}
+	if updated, ok := mergeBackupStatus(cluster, eval); ok {
+		cluster.Status.Backup = updated
+		changed = true
+	}
+	return changed
 }
