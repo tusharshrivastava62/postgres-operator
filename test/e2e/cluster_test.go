@@ -606,6 +606,86 @@ spec:
 		AddReportEntry("restore test", fmt.Sprintf("restored the newest backup in %s seconds", duration))
 	})
 
+	It("reports an unreachable bucket and falling-behind archiving, keeps accepting writes, and recovers", func() {
+		primary, err := clusterField(".status.primaryInstance")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() {
+			// Leave the store running if the scenario fails part-way.
+			_, _ = kubectlOut("-n", objectStoreNamespace, "scale", "deployment", "s3", "--replicas=1")
+		})
+
+		By("stopping the object store")
+		stopObjectStoreService()
+
+		By("writing enough WAL that archiving falls more than eight segments behind")
+		for i := range 12 {
+			_, err = psql(primary, "", fmt.Sprintf("insert into pitr(v) values ('outage-%d')", i))
+			Expect(err).NotTo(HaveOccurred(), "the database must keep accepting writes while it cannot archive")
+			_, err = psql(primary, "", "select pg_switch_wal()")
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		By("running the status check, as the schedule would")
+		_, err = inCluster("create", "job", "outage-status", "--from=cronjob/"+clusterName+"-backup-status")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _, _ = inCluster("delete", "job", "outage-status", "--wait=false") })
+		Eventually(func(g Gomega) {
+			archiving, err := conditionStatus("WALArchivingHealthy")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(archiving).To(Equal("False"), "WALArchivingHealthy")
+			backups, err := conditionStatus("BackupHealthy")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(backups).To(Equal("False"), "BackupHealthy")
+			degraded, err := conditionStatus("Degraded")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(degraded).To(Equal("True"))
+		}, 8*time.Minute, pollEvery).Should(Succeed())
+
+		reason, err := inCluster("get", "postgrescluster", clusterName, "-o",
+			`jsonpath={.status.conditions[?(@.type=="WALArchivingHealthy")].reason}`)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(reason).To(Equal("ArchivingBehind"))
+		lag, err := clusterField(".status.backup.walArchiving.lagBytes")
+		Expect(err).NotTo(HaveOccurred())
+		lagBytes, err := strconv.Atoi(lag)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lagBytes).To(BeNumerically(">", 8*16<<20))
+
+		By("bringing the store back")
+		restartObjectStoreService()
+
+		By("letting archiving catch up on its own")
+		closed, err := psql(primary, "", "select pg_walfile_name(pg_switch_wal() - 1)")
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func(g Gomega) {
+			out, err := psql(primary, "", fmt.Sprintf("select last_archived_wal >= '%s' from pg_stat_archiver", closed))
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(out).To(Equal("t"))
+		}, 6*time.Minute, pollEvery).Should(Succeed())
+
+		By("waiting for the next scheduled base backup, since the store came back empty")
+		list := `envdir /run/etc/wal-e.d/env wal-g backup-list 2>/dev/null | grep -c '^base_'`
+		Eventually(func(g Gomega) {
+			out, err := runInPod(primary, list)
+			g.Expect(err).NotTo(HaveOccurred())
+			count, err := strconv.Atoi(out)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(count).To(BeNumerically(">=", 1))
+		}, 6*time.Minute, pollEvery).Should(Succeed())
+
+		By("seeing the cluster healthy again")
+		_, err = inCluster("create", "job", "recovered-status", "--from=cronjob/"+clusterName+"-backup-status")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _, _ = inCluster("delete", "job", "recovered-status", "--wait=false") })
+		Eventually(func(g Gomega) {
+			for _, condition := range []string{"WALArchivingHealthy", "BackupHealthy"} {
+				status, err := conditionStatus(condition)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(status).To(Equal("True"), condition)
+			}
+		}, 8*time.Minute, pollEvery).Should(Succeed())
+	})
+
 	It("fails over when the primary is deleted, keeping the data and the service", func() {
 		old := ""
 		Eventually(func(g Gomega) { old = currentPrimary(g) }).Should(Succeed())

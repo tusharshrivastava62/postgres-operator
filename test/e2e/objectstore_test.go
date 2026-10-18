@@ -102,3 +102,25 @@ func startObjectStore() {
 func stopObjectStore() {
 	_, _ = kubectlOut("delete", "namespace", objectStoreNamespace, "--wait=false")
 }
+
+// stopObjectStoreService takes the store down without deleting its namespace,
+// so a scenario can bring it back. Its data is lost, as it lives in the pod.
+func stopObjectStoreService() {
+	_, err := kubectlOut("-n", objectStoreNamespace, "scale", "deployment", "s3", "--replicas=0")
+	Expect(err).NotTo(HaveOccurred())
+	Eventually(func() (string, error) {
+		return kubectlOut("-n", objectStoreNamespace, "get", "pods", "-l", "app=s3", "-o", "name")
+	}, 2*time.Minute, pollEvery).Should(BeEmpty())
+}
+
+// restartObjectStoreService brings the store back, empty, and creates the
+// bucket again.
+func restartObjectStoreService() {
+	_, err := kubectlOut("-n", objectStoreNamespace, "delete", "job", "mkbucket", "--ignore-not-found")
+	Expect(err).NotTo(HaveOccurred())
+	_, err = kubectlIn(objectStoreManifest(), "apply", "-f", "-")
+	Expect(err).NotTo(HaveOccurred())
+	Eventually(func() (string, error) {
+		return kubectlOut("-n", objectStoreNamespace, "get", "job", "mkbucket", "-o", "jsonpath={.status.succeeded}")
+	}, 5*time.Minute, pollEvery).Should(Equal("1"), "the bucket could not be created again")
+}
