@@ -83,9 +83,10 @@ type PostgresClusterReconciler struct {
 // operator needs them itself because Kubernetes only lets a principal create
 // a Role granting permissions it already holds. It also deletes the Endpoints
 // and ConfigMaps Patroni leaves behind when a cluster is deleted, which is
-// why those two have delete and pods does not.
+// why those two have delete. Pods are deleted too, by the rolling update,
+// which replaces them one at a time in a safe order (see rollout.go).
 // +kubebuilder:rbac:groups="",resources=configmaps;endpoints,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;update;patch;delete
 
 // Reconcile moves the actual cluster state (Secret, Patroni's access
 // objects, Services, PodDisruptionBudget, StatefulSet) closer to what a
@@ -193,9 +194,13 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// steps above actually converged to, not guess at partial progress from
 	// a step that just failed (that failure is already visible via the
 	// reconcile error itself, surfaced in logs/events and retried).
-	healthy, err := r.reconcileStatus(ctx, cluster)
+	view, err := r.reconcileStatus(ctx, cluster)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling status: %w", err)
+	}
+	rolling, err := r.reconcileRollout(ctx, cluster, view)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("rolling update: %w", err)
 	}
 
 	// After status, so a Patroni that is slow to answer never delays
@@ -210,7 +215,10 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// Pod and Endpoints events trigger most re-observation, but replication
 	// lag and an expiring leader lock change without one, so keep looking:
 	// often while something is wrong, rarely when all is well.
-	if !synced || !healthy {
+	if rolling {
+		return ctrl.Result{RequeueAfter: rolloutRequeueDelay}, nil
+	}
+	if !synced || !view.healthy {
 		return ctrl.Result{RequeueAfter: unhealthyRefreshInterval}, nil
 	}
 	return ctrl.Result{RequeueAfter: healthyRefreshInterval}, nil

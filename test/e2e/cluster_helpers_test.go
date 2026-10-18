@@ -17,7 +17,9 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // kubectlOut runs kubectl and returns its standard output only. The shared
@@ -74,4 +76,84 @@ func psql(pod, host, sql string) (string, error) {
 	return runInPod(pod,
 		`PGPASSWORD="$PGPASSWORD_SUPERUSER" psql ${1:+-h "$1"} -U postgres -d postgres -tAX -c "$2"`,
 		host, sql)
+}
+
+// writerManifest is a pod outside the database that inserts a row every
+// 100ms through the read-write Service, as an application would, and logs
+// "ok <ms>" or "fail <ms>" for each attempt. It runs as the same non-root
+// user, so it is admitted by the namespace's strict Pod Security level.
+func writerManifest(image string) string {
+	return fmt.Sprintf(`apiVersion: v1
+kind: Pod
+metadata:
+  name: writer
+  namespace: %s
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 101
+    runAsGroup: 103
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+  - name: writer
+    image: %s
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities: {drop: [ALL]}
+    env:
+    - {name: PGCONNECT_TIMEOUT, value: "2"}
+    - name: PGPASSWORD
+      valueFrom: {secretKeyRef: {name: %s-credentials, key: password}}
+    command:
+    - bash
+    - -c
+    - |
+      while true; do
+        s=$(date +%%s%%3N)
+        if psql -h %s -U postgres -d postgres -tAX -c "insert into e2e_rows(v) values ('writer')" >/dev/null 2>&1; then
+          echo "ok $s"
+        else
+          echo "fail $s"
+        fi
+        sleep 0.1
+      done
+`, clusterNamespace, image, clusterName, clusterName)
+}
+
+// writerResult summarises a writer's log.
+type writerResult struct {
+	acknowledged int
+	failed       int
+	// longestGap is the longest time between two acknowledged inserts, which
+	// is how long an application would have seen the database refuse writes.
+	longestGap time.Duration
+}
+
+func parseWriterLog(log string) writerResult {
+	var res writerResult
+	var last int64
+	for line := range strings.SplitSeq(log, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		ms, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		switch fields[0] {
+		case "ok":
+			if last != 0 {
+				if gap := time.Duration(ms-last) * time.Millisecond; gap > res.longestGap {
+					res.longestGap = gap
+				}
+			}
+			last = ms
+			res.acknowledged++
+		case "fail":
+			res.failed++
+		}
+	}
+	return res
 }

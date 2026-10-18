@@ -15,6 +15,7 @@ package e2e
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -120,8 +121,10 @@ func clusterSpecs() {
 		_, err := psql(fromPod, clusterName, fmt.Sprintf("insert into e2e_rows(v) values ('%s')", value))
 		g.Expect(err).NotTo(HaveOccurred())
 	}
+	// rowCount counts the rows the scenarios insert by name. The continuous
+	// writer's rows are counted separately, by the scenario that runs it.
 	rowCount := func(pod, host string) (string, error) {
-		return psql(pod, host, "select count(*) from e2e_rows")
+		return psql(pod, host, "select count(*) from e2e_rows where v <> 'writer'")
 	}
 
 	BeforeAll(func() {
@@ -293,6 +296,63 @@ func clusterSpecs() {
 		Consistently(func(g Gomega) {
 			g.Expect(currentPrimary(g)).To(Equal(primary))
 		}, 20*time.Second, pollEvery).Should(Succeed())
+	})
+
+	It("updates every pod one at a time, handing leadership over before it replaces the primary", func() {
+		image, err := clusterField(".status.image")
+		Expect(err).NotTo(HaveOccurred())
+		originalPrimary, err := clusterField(".status.primaryInstance")
+		Expect(err).NotTo(HaveOccurred())
+
+		_, err = psql(originalPrimary, "", "create table if not exists e2e_rows (id serial primary key, v text)")
+		Expect(err).NotTo(HaveOccurred())
+
+		_, err = kubectlIn(writerManifest(image), "apply", "-f", "-")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _, _ = inCluster("delete", "pod", "writer", "--wait=false") })
+		Eventually(func(g Gomega) {
+			log, err := inCluster("logs", "writer")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(parseWriterLog(log).acknowledged).To(BeNumerically(">=", 20))
+		}, 3*time.Minute, pollEvery).Should(Succeed())
+
+		By("changing the pod template, which requires replacing every pod")
+		_, err = inCluster("patch", "postgrescluster", clusterName, "--type=merge",
+			"-p", `{"spec":{"resources":{"requests":{"cpu":"150m"}}}}`)
+		Expect(err).NotTo(HaveOccurred())
+
+		Eventually(func(g Gomega) {
+			requests, err := inCluster("get", "pods", "-l", "app.kubernetes.io/component=postgres", "-o",
+				"jsonpath={.items[*].spec.containers[0].resources.requests.cpu}")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(strings.Fields(requests)).To(HaveLen(instances))
+			g.Expect(strings.Fields(requests)).To(HaveEach("150m"))
+			expectHealthy(g)
+		}, clusterUpTimeout+5*time.Minute, pollEvery).Should(Succeed())
+
+		By("checking what the application saw")
+		log, err := inCluster("logs", "writer")
+		Expect(err).NotTo(HaveOccurred())
+		result := parseWriterLog(log)
+		AddReportEntry("rolling update as seen by a writer",
+			fmt.Sprintf("%d acknowledged, %d failed, longest gap %s", result.acknowledged, result.failed, result.longestGap))
+		finalPrimary, err := clusterField(".status.primaryInstance")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(finalPrimary).NotTo(Equal(originalPrimary),
+			"leadership must have moved off the first primary before it was replaced")
+
+		// A switchover takes about 2 seconds (2.0 measured; the same cluster
+		// updated by an ordinary StatefulSet rolling update measured 2.3).
+		// The bound is generous: what it guards against is a handover that
+		// fails and leaves writes refused until Patroni's failover timeout.
+		Expect(result.longestGap).To(BeNumerically("<", 15*time.Second))
+
+		By("keeping every acknowledged write")
+		stored, err := psql(finalPrimary, "", "select count(*) from e2e_rows where v = 'writer'")
+		Expect(err).NotTo(HaveOccurred())
+		count, err := strconv.Atoi(stored)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(count).To(BeNumerically(">=", result.acknowledged))
 	})
 
 	It("fails over when the primary is deleted, keeping the data and the service", func() {

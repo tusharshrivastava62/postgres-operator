@@ -166,7 +166,7 @@ func (r *PostgresClusterReconciler) reconcilePodDisruptionBudget(ctx context.Con
 // that slice on every reconcile would trigger a spurious diff against the
 // persisted object and the Update would be rejected. Instead: build the full
 // object only for Create, and on Update touch just the fields Kubernetes
-// allows to change after creation (replicas, pod template, labels).
+// allows to change after creation (replicas, pod template, update strategy, labels).
 func (r *PostgresClusterReconciler) reconcileStatefulSet(ctx context.Context, cluster *dbv1alpha1.PostgresCluster, image string) error {
 	desired, err := desiredStatefulSet(cluster, image)
 	if err != nil {
@@ -188,6 +188,7 @@ func (r *PostgresClusterReconciler) reconcileStatefulSet(ctx context.Context, cl
 	existing.Labels = desired.Labels
 	existing.Spec.Replicas = desired.Spec.Replicas
 	existing.Spec.Template = desired.Spec.Template
+	existing.Spec.UpdateStrategy = desired.Spec.UpdateStrategy
 	return r.Update(ctx, existing)
 }
 

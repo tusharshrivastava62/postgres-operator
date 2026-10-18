@@ -45,6 +45,9 @@ const (
 // stale for a primary that has hung.
 const annotationLeader = "leader"
 
+// switchoverTimeout bounds one switchover request.
+const switchoverTimeout = 60 * time.Second
+
 // leaderRequeueDelay is how soon to look again when there is no leader to
 // talk to yet, as during cluster creation or a failover.
 const leaderRequeueDelay = 10 * time.Second
@@ -56,6 +59,10 @@ type PatroniAPI interface {
 	// PatchConfig merges the given keys into it. Patroni validates the
 	// merged result as a whole and rejects an inconsistent change.
 	PatchConfig(ctx context.Context, address string, patch map[string]any) error
+	// Switchover asks the leader at address to hand leadership to candidate,
+	// or to any eligible replica when candidate is empty. It returns once
+	// the handover has completed.
+	Switchover(ctx context.Context, address, leader, candidate string) error
 }
 
 // httpPatroni talks to Patroni's REST API over plain HTTP, which is how the
@@ -65,14 +72,20 @@ type httpPatroni struct {
 }
 
 func newHTTPPatroni() *httpPatroni {
-	return &httpPatroni{client: &http.Client{Timeout: 10 * time.Second}}
+	// No client-wide timeout: each request carries its own deadline.
+	return &httpPatroni{client: &http.Client{}}
 }
 
 func patroniURL(address string) string {
 	return "http://" + net.JoinHostPort(address, strconv.Itoa(int(patroniPort))) + "/config"
 }
 
+// requestTimeout bounds a read or a configuration change.
+const requestTimeout = 10 * time.Second
+
 func (p *httpPatroni) GetConfig(ctx context.Context, address string) (map[string]any, error) {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, patroniURL(address), nil)
 	if err != nil {
 		return nil, err
@@ -89,11 +102,36 @@ func (p *httpPatroni) GetConfig(ctx context.Context, address string) (map[string
 }
 
 func (p *httpPatroni) PatchConfig(ctx context.Context, address string, patch map[string]any) error {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
 	payload, err := json.Marshal(patch)
 	if err != nil {
 		return err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, patroniURL(address), bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	_, err = p.do(req)
+	return err
+}
+
+func (p *httpPatroni) Switchover(ctx context.Context, address, leader, candidate string) error {
+	body := map[string]string{"leader": leader}
+	if candidate != "" {
+		body["candidate"] = candidate
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	// A switchover waits for the old leader to demote and the new one to
+	// take over, which takes a few seconds; allow far longer than a read.
+	ctx, cancel := context.WithTimeout(ctx, switchoverTimeout)
+	defer cancel()
+	url := "http://" + net.JoinHostPort(address, strconv.Itoa(int(patroniPort))) + "/switchover"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}

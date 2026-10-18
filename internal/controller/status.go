@@ -231,26 +231,28 @@ func orUnknown(s string) string {
 // (meta.SetStatusCondition reports whether it did, and the other fields are
 // compared). Skipping the no-op write matters because replication lag moves
 // constantly: without it every reconcile would write status.
-func (r *PostgresClusterReconciler) reconcileStatus(ctx context.Context, cluster *dbv1alpha1.PostgresCluster) (bool, error) {
+func (r *PostgresClusterReconciler) reconcileStatus(ctx context.Context, cluster *dbv1alpha1.PostgresCluster) (clusterView, error) {
 	sts := &appsv1.StatefulSet{}
 	stsErr := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: cluster.Name}, sts)
 	if stsErr != nil && !apierrors.IsNotFound(stsErr) {
-		return false, stsErr
+		return clusterView{}, stsErr
 	}
 	var ready int32
+	var updateRevision string
 	if stsErr == nil {
 		ready = sts.Status.ReadyReplicas
+		updateRevision = sts.Status.UpdateRevision
 	}
 	desired := cluster.Spec.Instances
 	instancesReady.WithLabelValues(cluster.Namespace, cluster.Name).Set(float64(ready))
 
 	leader, lockFresh, err := r.leaderOf(ctx, cluster)
 	if err != nil {
-		return false, err
+		return clusterView{}, err
 	}
 	pods := &corev1.PodList{}
 	if err := r.List(ctx, pods, client.InNamespace(cluster.Namespace), client.MatchingLabels(podSelectorLabels(cluster))); err != nil {
-		return false, err
+		return clusterView{}, err
 	}
 	obs := observeCluster(cluster, leader, lockFresh, membersOf(pods.Items))
 
@@ -302,10 +304,17 @@ func (r *PostgresClusterReconciler) reconcileStatus(ctx context.Context, cluster
 		progressing.Status = metav1.ConditionFalse
 		progressing.Reason = "ReconcileComplete"
 	}
+	// Pods still on the previous template mean a rolling update is under way,
+	// even while every one of them is Ready.
+	if outdated := outdatedPods(updateRevision, rolloutPodsOf(pods.Items)); outdated > 0 {
+		progressing.Status = metav1.ConditionTrue
+		progressing.Reason = "RollingUpdate"
+		progressing.Message = fmt.Sprintf("%d of %d pods are still being updated", outdated, len(pods.Items))
+	}
 
 	degraded, err := r.backupCondition(ctx, cluster)
 	if err != nil {
-		return false, err
+		return clusterView{}, err
 	}
 
 	changed := meta.SetStatusCondition(&cluster.Status.Conditions, available)
@@ -328,11 +337,18 @@ func (r *PostgresClusterReconciler) reconcileStatus(ctx context.Context, cluster
 		changed = true
 	}
 
-	healthy := obs.primary != "" && obs.replicationHealthy
+	view := clusterView{obs: obs, pods: pods.Items, healthy: obs.primary != "" && obs.replicationHealthy}
 	if !changed {
-		return healthy, nil
+		return view, nil
 	}
-	return healthy, r.Status().Update(ctx, cluster)
+	return view, r.Status().Update(ctx, cluster)
+}
+
+// clusterView is what one reconcile saw of the running cluster.
+type clusterView struct {
+	obs     observation
+	pods    []corev1.Pod
+	healthy bool
 }
 
 func sameLags(a, b map[string]int64) bool {

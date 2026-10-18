@@ -97,9 +97,12 @@ Apply that, and the operator's reconcile loop takes it from there.
 - **Patroni's REST API is unauthenticated** inside the cluster, and pods can reach each
   other's. The operator uses it to apply `spec.ha`. Restrict it with a `NetworkPolicy` that
   allows the operator and the cluster's own pods to reach port 8008.
-- **Changing pod-level settings restarts pods one after another without a controlled
-  switchover.** A new image or resource limits takes the primary down for a failover rather
-  than handing over first.
+- **Pod-level changes replace pods one at a time, and the primary goes last.** A new image or
+  new resource limits are rolled out by the operator, not by the `StatefulSet`: replicas first,
+  each only once replication is healthy again, then a Patroni switchover to an updated replica
+  (about 2 seconds of refused writes), then the old primary. A new revision that cannot start
+  stops the rollout after the first replica. A single-instance cluster has nobody to hand over
+  to, so its pod is simply replaced.
 - **Backups are still logical dumps** (`pg_dumpall` to a PVC), not continuous archiving, so
   there is no point-in-time recovery.
 - **The PostgreSQL major version is fixed at creation.** Supported versions are 16, 17 and 18,

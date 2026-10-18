@@ -173,6 +173,9 @@ func desiredStatefulSet(cluster *dbv1alpha1.PostgresCluster, image string) (*app
 			// replaced during an outage should rejoin immediately, not queue
 			// behind ordinal order.
 			PodManagementPolicy: appsv1.ParallelPodManagement,
+			// The operator replaces pods itself, replicas first and the primary
+			// only after a switchover; see rollout.go.
+			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{Type: appsv1.OnDeleteStatefulSetStrategyType},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: selector},
 				Spec: corev1.PodSpec{

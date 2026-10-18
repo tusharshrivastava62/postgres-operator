@@ -44,8 +44,8 @@ var _ = Describe("Observing a cluster", func() {
 	healthy := func() []member {
 		return []member{
 			readyMember("c-0", "primary", 1000, ""),
-			readyMember("c-1", "replica", 900, "streaming"),
-			readyMember("c-2", "replica", 1000, "streaming"),
+			readyMember(pod1, "replica", 900, "streaming"),
+			readyMember(pod2, "replica", 1000, "streaming"),
 		}
 	}
 
@@ -53,13 +53,13 @@ var _ = Describe("Observing a cluster", func() {
 		obs := observeCluster(three(), "c-0", true, healthy())
 		Expect(obs.primary).To(Equal("c-0"))
 		Expect(obs.replicationHealthy).To(BeTrue())
-		Expect(obs.lags).To(Equal(map[string]int64{"c-1": 100, "c-2": 0}))
+		Expect(obs.lags).To(Equal(map[string]int64{pod1: 100, pod2: 0}))
 	})
 
 	It("never reports negative lag when a replica reads ahead of the primary's last report", func() {
 		members := healthy()
 		members[1].status.XLogLocation = 1100
-		Expect(observeCluster(three(), "c-0", true, members).lags).To(HaveKeyWithValue("c-1", int64(0)))
+		Expect(observeCluster(three(), "c-0", true, members).lags).To(HaveKeyWithValue(pod1, int64(0)))
 	})
 
 	It("has no primary when nothing has been elected", func() {
@@ -88,8 +88,8 @@ var _ = Describe("Observing a cluster", func() {
 		members := healthy()
 		// c-0 hung and still calls itself primary; c-1 has been elected.
 		members[1].status.Role = "primary"
-		obs := observeCluster(three(), "c-1", true, members)
-		Expect(obs.primary).To(Equal("c-1"))
+		obs := observeCluster(three(), pod1, true, members)
+		Expect(obs.primary).To(Equal(pod1))
 		Expect(obs.replicationHealthy).To(BeFalse(), "two members claiming to be primary is not healthy")
 		Expect(obs.replicationMessage).To(ContainSubstring("2 members report themselves as primary"))
 	})
@@ -100,7 +100,7 @@ var _ = Describe("Observing a cluster", func() {
 		obs := observeCluster(three(), "c-0", true, members)
 		Expect(obs.replicationHealthy).To(BeFalse())
 		Expect(obs.replicationMessage).To(ContainSubstring("c-1 is not streaming"))
-		Expect(obs.lags).NotTo(HaveKey("c-1"))
+		Expect(obs.lags).NotTo(HaveKey(pod1))
 	})
 
 	It("flags a replica further behind than maximumLagOnFailover", func() {
@@ -109,12 +109,12 @@ var _ = Describe("Observing a cluster", func() {
 		obs := observeCluster(c, "c-0", true, healthy())
 		Expect(obs.replicationHealthy).To(BeFalse())
 		Expect(obs.replicationMessage).To(ContainSubstring("c-1 is 100 bytes behind"))
-		Expect(obs.lags).To(HaveKeyWithValue("c-1", int64(100)), "still reported, just not healthy")
+		Expect(obs.lags).To(HaveKeyWithValue(pod1, int64(100)), "still reported, just not healthy")
 	})
 
 	It("flags a replica that has not reported its state yet", func() {
 		members := healthy()
-		members[2] = member{name: "c-2", ready: false}
+		members[2] = member{name: pod2, ready: false}
 		obs := observeCluster(three(), "c-0", true, members)
 		Expect(obs.replicationHealthy).To(BeFalse())
 		Expect(obs.replicationMessage).To(ContainSubstring("c-2 has not reported"))

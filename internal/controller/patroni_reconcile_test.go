@@ -677,6 +677,17 @@ type fakePatroni struct {
 	calls     []string
 	addresses []string
 	patched   map[string]any
+
+	// switchovers records each request as "<leader>-><candidate>"; a request
+	// with no candidate ends in "->".
+	switchovers   []string
+	switchoverErr map[string]error
+}
+
+func (f *fakePatroni) Switchover(_ context.Context, address, leader, candidate string) error {
+	f.calls = append(f.calls, "switchover "+address)
+	f.switchovers = append(f.switchovers, leader+"->"+candidate)
+	return f.switchoverErr[candidate]
 }
 
 func (f *fakePatroni) GetConfig(_ context.Context, address string) (map[string]any, error) {
