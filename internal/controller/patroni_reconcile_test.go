@@ -103,7 +103,7 @@ var _ = Describe("Patroni configuration", func() {
 			live := map[string]any{
 				dcsTTL: float64(30), dcsLoopWait: float64(10), dcsRetryTimeout: float64(10),
 				dcsMaximumLagOnFailover: float64(1048576), dcsFailsafeMode: true, dcsSynchronousMode: false,
-				"postgresql": map[string]any{"use_slots": true},
+				dcsPostgresql: map[string]any{"use_slots": true},
 			}
 			Expect(configDiff(dcs(newCluster()), live)).To(BeEmpty())
 		})
@@ -112,7 +112,7 @@ var _ = Describe("Patroni configuration", func() {
 			live := map[string]any{
 				dcsTTL: float64(30), dcsLoopWait: float64(10), dcsRetryTimeout: float64(10),
 				dcsMaximumLagOnFailover: float64(1048576), dcsFailsafeMode: true, dcsSynchronousMode: false,
-				"postgresql": map[string]any{"use_slots": true},
+				dcsPostgresql: map[string]any{"use_slots": true},
 			}
 			c := newCluster()
 			c.Spec.HA.SynchronousMode = true

@@ -176,13 +176,14 @@ var _ = Describe("PostgresCluster compliance validation", func() {
 			Expect(warnings).To(BeEmpty())
 		})
 
-		It("warns that pods will roll when the standard changes on a running cluster", func() {
+		It("says no restart is needed when one standard is swapped for another", func() {
 			updated := obj.DeepCopy()
 			updated.Spec.Compliance.Standard = dbv1alpha1.StandardPCI
 			warnings, err := validator.ValidateUpdate(ctx, obj, updated)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(warnings).To(ConsistOf(And(
-				ContainSubstring(`from "hipaa" to "pci"`), ContainSubstring("replaced one at a time"))))
+				ContainSubstring(`from "hipaa" to "pci"`), ContainSubstring("without restarting"))))
+			Expect(warnings[0]).NotTo(ContainSubstring("replaced"), "only the settings that reload change")
 		})
 
 		It("warns when a standard is added to a running cluster", func() {
@@ -190,7 +191,7 @@ var _ = Describe("PostgresCluster compliance validation", func() {
 			before.Spec.Compliance = nil
 			warnings, err := validator.ValidateUpdate(ctx, before, obj)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(warnings).To(ConsistOf(ContainSubstring(`from none to "hipaa"`)))
+			Expect(warnings).To(ConsistOf(And(ContainSubstring(`from none to "hipaa"`), ContainSubstring("replaced one at a time"))))
 		})
 
 		It("warns when a standard is removed from a running cluster", func() {
@@ -198,7 +199,7 @@ var _ = Describe("PostgresCluster compliance validation", func() {
 			after.Spec.Compliance = nil
 			warnings, err := validator.ValidateUpdate(ctx, obj, after)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(warnings).To(ConsistOf(ContainSubstring(`from "hipaa" to none`)))
+			Expect(warnings).To(ConsistOf(And(ContainSubstring(`from "hipaa" to none`), ContainSubstring("replaced one at a time"))))
 		})
 
 		It("does not warn when the standard is unchanged, whatever else changed", func() {
@@ -207,6 +208,20 @@ var _ = Describe("PostgresCluster compliance validation", func() {
 			updated.Spec.Compliance.AuditLogs.RetentionDays = 400
 			warnings, err := validator.ValidateUpdate(ctx, obj, updated)
 			Expect(err).NotTo(HaveOccurred())
+			Expect(warnings).To(BeEmpty())
+		})
+
+		It("warns that a custom image must contain pgaudit and the preloaded extensions", func() {
+			obj.Spec.Image = "registry.example/postgres:17"
+			warnings, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(warnings).To(ConsistOf(And(ContainSubstring("spec.image"), ContainSubstring("pgaudit"))))
+		})
+
+		It("does not warn about the image when there are no compliance settings", func() {
+			obj.Spec.Image = "registry.example/postgres:17"
+			obj.Spec.Compliance = nil
+			warnings, _ := validator.ValidateCreate(ctx, obj)
 			Expect(warnings).To(BeEmpty())
 		})
 

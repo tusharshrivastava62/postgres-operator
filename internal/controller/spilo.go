@@ -71,7 +71,7 @@ const (
 // edited, for no effect. The operator applies the real values to the running
 // cluster through Patroni's REST API instead (see syncPatroniConfig), a
 // moment after the first leader appears.
-func spiloConfiguration() (string, error) {
+func spiloConfiguration(cluster *dbv1alpha1.PostgresCluster) (string, error) {
 	config := map[string]any{
 		"bootstrap": map[string]any{
 			"dcs": map[string]any{
@@ -93,6 +93,11 @@ func spiloConfiguration() (string, error) {
 			"ports": []map[string]any{{"name": postgresPortName, "port": postgresPort}},
 		},
 	}
+	// The one setting that cannot go through Patroni's REST API; see
+	// paramPreload. A cluster without compliance settings keeps Spilo's list.
+	if libraries := preloadLibraries(cluster); libraries != "" {
+		config[dcsPostgresql] = map[string]any{dcsParameters: map[string]any{paramPreload: libraries}}
+	}
 	out, err := yaml.Marshal(config)
 	if err != nil {
 		return "", fmt.Errorf("rendering SPILO_CONFIGURATION: %w", err)
@@ -105,7 +110,7 @@ func spiloConfiguration() (string, error) {
 // cluster name, with the role and scope labels below telling it which pods
 // belong to the cluster and where to publish each pod's role.
 func spiloEnv(cluster *dbv1alpha1.PostgresCluster) ([]corev1.EnvVar, error) {
-	config, err := spiloConfiguration()
+	config, err := spiloConfiguration(cluster)
 	if err != nil {
 		return nil, err
 	}

@@ -15,6 +15,8 @@ package e2e
 import (
 	"fmt"
 	"os"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -790,6 +792,168 @@ spec:
 				g.Expect(status).To(Equal("True"), condition)
 			}
 		}, 8*time.Minute, pollEvery).Should(Succeed())
+	})
+
+	It("loads pgaudit through the pod template, audits what is asked, and takes it out again", func() {
+		const probeTable = "audit_probe"
+		podUIDs := func() string {
+			out, err := inCluster("get", "pods", "-l", mainSelector+",app.kubernetes.io/component=postgres",
+				"-o", "jsonpath={range .items[*]}{.metadata.uid} {end}")
+			Expect(err).NotTo(HaveOccurred())
+			fields := strings.Fields(out)
+			slices.Sort(fields)
+			return strings.Join(fields, " ")
+		}
+		show := func(pod, setting string) string {
+			out, err := psql(pod, "", "show "+setting)
+			ExpectWithOffset(1, err).NotTo(HaveOccurred())
+			return out
+		}
+		pods := func() []string {
+			out, err := inCluster("get", "pods", "-l", mainSelector+",app.kubernetes.io/component=postgres", "-o", "name")
+			ExpectWithOffset(1, err).NotTo(HaveOccurred())
+			names := strings.Fields(out)
+			for i, name := range names {
+				names[i] = strings.TrimPrefix(name, "pod/")
+			}
+			return names
+		}
+		patchCompliance := func(patch string) {
+			_, err := inCluster("patch", "postgrescluster", clusterName, "--type=merge", "-p", patch)
+			ExpectWithOffset(1, err).NotTo(HaveOccurred())
+		}
+		auditLog := func(pod string) string {
+			out, err := runInPod(pod, `cat "$(ls -t /home/postgres/pgdata/pgroot/pg_log/*.csv | head -1)"`)
+			ExpectWithOffset(1, err).NotTo(HaveOccurred())
+			return out
+		}
+		DeferCleanup(func() {
+			_, _ = inCluster("patch", "postgrescluster", clusterName, "--type=merge", "-p", `{"spec":{"compliance":null}}`)
+		})
+
+		primary, err := clusterField(".status.primaryInstance")
+		Expect(err).NotTo(HaveOccurred())
+
+		By("asking the image itself what it would load, so a newer Spilo cannot change the answer unnoticed")
+		defaultList, err := runInPod(primary, `python3 -c "
+import sys; sys.path.insert(0, '/scripts')
+from spilo_commons import append_extensions
+print(append_extensions('bg_mon,pg_stat_statements,pgextwlist,pg_auth_mon,set_user', 17.0))"`)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(show(primary, "shared_preload_libraries")).To(Equal(defaultList), "before the change, Spilo's own list")
+
+		image, err := clusterField(".status.image")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = kubectlIn(writerManifest(image), "apply", "-f", "-")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _, _ = inCluster("delete", "pod", "writer", "--wait=false") })
+		Eventually(func(g Gomega) {
+			log, err := inCluster("logs", "writer")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(parseWriterLog(log).acknowledged).To(BeNumerically(">=", 20))
+		}, 3*time.Minute, pollEvery).Should(Succeed())
+
+		before := podUIDs()
+
+		By("turning the hipaa standard on, which replaces every pod")
+		enable := fmt.Sprintf(`{"spec":{"compliance":{"standard":"hipaa","auditLogs":{"destination":`+
+			`{"bucket":%q,"endpoint":%q,"forcePathStyle":true,"credentialsSecret":"backup-s3"}}}}}`,
+			backupBucket, objectStoreEndpoint)
+		patchCompliance(enable)
+		Eventually(func(g Gomega) {
+			g.Expect(podUIDs()).NotTo(Equal(before))
+			for uid := range strings.FieldsSeq(before) {
+				g.Expect(podUIDs()).NotTo(ContainSubstring(uid), "every pod was replaced")
+			}
+			g.Expect(strings.Fields(podUIDs())).To(HaveLen(instances))
+			expectHealthy(g)
+		}, clusterUpTimeout+5*time.Minute, pollEvery).Should(Succeed())
+
+		By("loading pgaudit on every member, after Spilo's own list, and nothing it already loaded left out")
+		for _, pod := range pods() {
+			Expect(show(pod, "shared_preload_libraries")).To(Equal(defaultList+",pgaudit"), pod)
+		}
+
+		primary, err = clusterField(".status.primaryInstance")
+		Expect(err).NotTo(HaveOccurred())
+		By("applying the preset's settings without a restart")
+		Eventually(func(g Gomega) {
+			g.Expect(show(primary, "pgaudit.log")).To(Equal("read,write,ddl,role"))
+			g.Expect(show(primary, "pgaudit.log_parameter")).To(Equal("off"))
+			g.Expect(show(primary, "log_statement")).To(Equal("none"))
+		}, 3*time.Minute, pollEvery).Should(Succeed())
+
+		By("logging a read, a write, a DDL statement and a role change, and not writing DDL twice")
+		for _, sql := range []string{
+			"create table " + probeTable + " (secret text)",
+			"insert into " + probeTable + " values ('plain-literal')",
+			"select * from " + probeTable,
+			"create role audit_probe_role",
+		} {
+			_, err = psql(primary, "", sql)
+			Expect(err).NotTo(HaveOccurred())
+		}
+		Eventually(func(g Gomega) {
+			log := auditLog(primary)
+			for _, want := range []string{"DDL,CREATE TABLE,", "WRITE,INSERT,", "READ,SELECT,", "ROLE,CREATE ROLE,"} {
+				g.Expect(log).To(ContainSubstring("AUDIT: SESSION,"), want)
+				g.Expect(log).To(MatchRegexp(regexp.QuoteMeta(want)+`[^\n]*`+probeTable), want)
+			}
+			g.Expect(log).NotTo(ContainSubstring("statement: create table "+probeTable),
+				"log_statement is off, so pgaudit's line is the only record of the statement")
+		}, time.Minute, pollEvery).Should(Succeed())
+
+		By("not writing the value bound to a statement's parameter, since that would be clear text")
+		_, err = runInPod(primary, `PGPASSWORD="$PGPASSWORD_SUPERUSER" psql -U postgres -d postgres -tAX `+
+			`-c "prepare audit_probe_stmt(text) as insert into `+probeTable+` values (\$1)" `+
+			`-c "execute audit_probe_stmt('bound-parameter-value')"`)
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func(g Gomega) {
+			log := auditLog(primary)
+			g.Expect(log).To(ContainSubstring("prepare audit_probe_stmt"))
+			g.Expect(log).NotTo(ContainSubstring("bound-parameter-value"))
+		}, time.Minute, pollEvery).Should(Succeed())
+
+		By("swapping one standard for another by reloading, without replacing a pod")
+		during := podUIDs()
+		patchCompliance(`{"spec":{"compliance":{"standard":"soc2"}}}`)
+		Eventually(func() string { return show(primary, "pgaudit.log") }, 3*time.Minute, pollEvery).
+			Should(Equal("read,write,ddl"))
+		Expect(podUIDs()).To(Equal(during), "a change of standard is only a reload")
+
+		By("turning it off, which replaces every pod again and puts Spilo's settings back")
+		patchCompliance(`{"spec":{"compliance":null}}`)
+		Eventually(func(g Gomega) {
+			for uid := range strings.FieldsSeq(during) {
+				g.Expect(podUIDs()).NotTo(ContainSubstring(uid), "every pod was replaced")
+			}
+			g.Expect(strings.Fields(podUIDs())).To(HaveLen(instances))
+			expectHealthy(g)
+		}, clusterUpTimeout+5*time.Minute, pollEvery).Should(Succeed())
+		primary, err = clusterField(".status.primaryInstance")
+		Expect(err).NotTo(HaveOccurred())
+		for _, pod := range pods() {
+			Expect(show(pod, "shared_preload_libraries")).To(Equal(defaultList), pod)
+		}
+		Eventually(func(g Gomega) {
+			config, err := runInPod(primary, `curl -s localhost:8008/config`)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(config).NotTo(ContainSubstring("pgaudit"), "the settings the operator wrote are deleted")
+			g.Expect(show(primary, "log_statement")).To(Equal("ddl"))
+		}, 3*time.Minute, pollEvery).Should(Succeed())
+
+		By("checking what the application saw across both replacements")
+		log, err := inCluster("logs", "writer")
+		Expect(err).NotTo(HaveOccurred())
+		result := parseWriterLog(log)
+		AddReportEntry("enabling and disabling compliance as seen by a writer",
+			fmt.Sprintf("%d acknowledged, %d failed, longest gap %s", result.acknowledged, result.failed, result.longestGap))
+		Expect(result.longestGap).To(BeNumerically("<", 15*time.Second))
+		stored, err := psql(primary, "", "select count(*) from e2e_rows where v = 'writer'")
+		Expect(err).NotTo(HaveOccurred())
+		count, err := strconv.Atoi(stored)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(count).To(BeNumerically(">=", result.acknowledged), "every acknowledged write is still there")
 	})
 
 	It("fails over when the primary is deleted, keeping the data and the service", func() {

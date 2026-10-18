@@ -45,7 +45,7 @@ var _ = Describe("PostgresCluster CRD compliance fields", func() {
 				Storage: dbv1alpha1.StorageSpec{Size: resource.MustParse(storageSize)},
 				Compliance: &dbv1alpha1.ComplianceSpec{
 					Standard:  dbv1alpha1.StandardHIPAA,
-					AuditLogs: dbv1alpha1.AuditLogsSpec{Destination: &dbv1alpha1.BackupDestination{Bucket: "audit-logs", CredentialsSecret: "audit-s3"}},
+					AuditLogs: dbv1alpha1.AuditLogsSpec{Destination: &dbv1alpha1.BackupDestination{Bucket: auditBucket, CredentialsSecret: auditSecret}},
 				},
 			},
 		}

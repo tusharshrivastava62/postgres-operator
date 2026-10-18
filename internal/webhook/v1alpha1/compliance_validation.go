@@ -62,13 +62,30 @@ func complianceWarnings(old, cluster *dbv1alpha1.PostgresCluster) admission.Warn
 				"audit log in clear text, so any sensitive value a client sends will be in it")
 	}
 
+	// pgaudit has to be loaded when PostgreSQL starts, and the list of what to
+	// load is in the pod template, so turning the settings on or off replaces
+	// the pods. Moving between standards only changes settings that reload.
 	if old != nil {
 		before, after := standardOf(old), standardOf(cluster)
-		if before != after {
+		switch {
+		case before == after:
+		case before == "" || after == "":
 			warnings = append(warnings, fmt.Sprintf(
 				"the compliance standard changed from %s to %s: the database pods will be replaced one at a time, replicas "+
 					"first and the primary after a switchover, so writes are refused for a few seconds", describe(before), describe(after)))
+		default:
+			warnings = append(warnings, fmt.Sprintf(
+				"the compliance standard changed from %s to %s: the new audit settings are applied to the running pods "+
+					"without restarting them", describe(before), describe(after)))
 		}
+	}
+
+	// The pods load pgaudit and the extensions Spilo loads by default, by name.
+	// An image without them cannot start PostgreSQL.
+	if cluster.Spec.Compliance != nil && cluster.Spec.Image != "" {
+		warnings = append(warnings,
+			"spec.image is set with spec.compliance: the image must contain pgaudit and every extension the default image "+
+				"preloads, or the database pods will not start")
 	}
 	return warnings
 }

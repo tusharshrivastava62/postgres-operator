@@ -39,6 +39,13 @@ const (
 	dcsSynchronousMode      = "synchronous_mode"
 )
 
+// The section of Patroni's configuration that holds PostgreSQL's own settings,
+// and the settings in it.
+const (
+	dcsPostgresql = "postgresql"
+	dcsParameters = "parameters"
+)
+
 // annotationLeader is where Patroni records which member holds the leader
 // lock, on the Endpoints object named after the cluster. It is the only
 // trustworthy answer to "who is the primary": the role label on a pod can be
@@ -157,8 +164,9 @@ func (p *httpPatroni) do(req *http.Request) ([]byte, error) {
 }
 
 // desiredDynamicConfig is the slice of Patroni's dynamic configuration this
-// operator manages. Anything else in it (PostgreSQL parameters, replication
-// slots) is left exactly as it is.
+// operator manages. Anything else in it (replication slots, other PostgreSQL
+// parameters) is left exactly as it is. The audit settings under
+// postgresql.parameters are the one exception; see complianceParameterPatch.
 //
 // failoverTimeout becomes Patroni's ttl, and loop_wait and retry_timeout are
 // each a third of it (rounded down). Patroni requires
@@ -272,6 +280,9 @@ func (r *PostgresClusterReconciler) syncPatroniConfig(ctx context.Context, clust
 		return false, nil
 	}
 	diff := configDiff(desiredDynamicConfig(cluster), live)
+	if patch := complianceParameterPatch(cluster, live); patch != nil {
+		diff[dcsPostgresql] = patch[dcsPostgresql]
+	}
 	if len(diff) == 0 {
 		return true, nil
 	}

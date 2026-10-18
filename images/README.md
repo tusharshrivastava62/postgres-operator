@@ -42,6 +42,11 @@ does not perform major-version upgrades.
 4. Update `defaultImages` in `internal/controller/images.go` to the new tag. Existing clusters are
    not affected: each keeps the image recorded in its `status.image` until `spec.image` is
    changed.
+5. Check the list of libraries Spilo preloads. The operator writes it out in full, plus `pgaudit`,
+   for clusters with `spec.compliance` (`spiloPreloadLibraries` in
+   `internal/controller/compliance.go`), so a library Spilo adds or drops in the new release
+   changes what a compliance cluster loads. The end-to-end test that turns compliance on asks the
+   image for its own list and fails if the two differ.
 
 The workflow also runs every Monday without publishing, so newly disclosed vulnerabilities show
 up as a failed run instead of going unnoticed.
