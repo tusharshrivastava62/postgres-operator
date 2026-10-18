@@ -72,7 +72,7 @@ Apply that, and the operator's reconcile loop takes it from there.
   and `.status.replicationLagBytes` gives each streaming replica's lag. `.status.conditions`
   says what that means: `Available` (a Ready primary exists), `ReplicationHealthy` (every
   replica is streaming within `maximumLagOnFailover`), `FailoverInProgress` (there was a
-  primary and now there is not), `Progressing`, and `Degraded` (the last backup failed).
+  primary and now there is not), `Progressing`, and `Degraded` (a backup, WAL archiving or restore test is unhealthy).
   `kubectl get postgrescluster` shows version, instances, primary and availability. With
   backups on, `.status.backup` shows the newest backup, how many exist, the earliest time a
   restore can reach, and how far WAL archiving is behind, and the `BackupHealthy` and
@@ -131,6 +131,9 @@ Apply that, and the operator's reconcile loop takes it from there.
 - **A bucket that stops accepting writes lets WAL pile up on the primary's disk** until it is
   fixed. Archiving lag is reported (`WALArchivingHealthy`,
   `postgrescluster_wal_archive_lag_bytes`), so alert on it, and size the data volume for an outage.
+- **Backups and restores are S3 only, and a restore always makes a new cluster.** There is no
+  in-place restore. Restoring, encrypting, alerting and sizing are covered in
+  [`docs/backup-and-restore.md`](docs/backup-and-restore.md).
 - **A restore test needs scratch space as large as the database.** Its pod writes the restored
   data to an `emptyDir` capped at `spec.storage.size`, so the node needs that much ephemeral
   storage while it runs.
@@ -138,8 +141,8 @@ Apply that, and the operator's reconcile loop takes it from there.
   and `spec.version` can't be changed afterwards - the API server rejects it. Pointing newer
   Postgres binaries at an older data directory doesn't work, and an in-place major-version
   upgrade (`pg_upgrade`) isn't implemented. To move to a newer major version, create a new
-  cluster and migrate the data into it (the scheduled backups are `pg_dumpall` dumps, which
-  restore across major versions).
+  cluster and migrate the data into it with `pg_dumpall` or logical replication. The operator's
+  backups are physical, so they restore only to the same major version.
 
 ## Install
 
@@ -200,6 +203,7 @@ kubectl run psql --rm -it --restart=Never --image=postgres:17 -- \
 | `internal/webhook/v1alpha1/` | The validating admission webhook |
 | `config/` | Raw kustomize manifests (CRD, RBAC, manager, webhook, cert-manager) |
 | `charts/postgres-operator/` | The Helm chart (see its own README for the `crds/` caveat) |
+| `docs/` | Backup and restore runbook, bucket policy, sizing and alerting |
 | `images/` | The pinned upstream Spilo release and the workflow inputs for the database images |
 | `test/e2e/` | End-to-end tests that deploy the full stack into a real Kind cluster and break real clusters |
 
