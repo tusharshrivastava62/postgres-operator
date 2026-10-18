@@ -10,9 +10,10 @@ spec:
   version: "17"
   storage:
     size: 1Gi
+  # Backups are off here because they need a bucket and a credentials Secret.
+  # See db_v1alpha1_postgrescluster_backup.yaml for a cluster that uses them.
   backup:
-    enabled: true
-    schedule: "0 2 * * *"
+    enabled: false
   resources:
     requests:
       cpu: "250m"

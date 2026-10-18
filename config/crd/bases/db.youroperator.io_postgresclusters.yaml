@@ -60,16 +60,222 @@ spec:
                   backup configures scheduled backups for the cluster. Omit or leave
                   enabled=false to run without scheduled backups.
                 properties:
+                  destination:
+                    description: destination is where backups and archived WAL are
+                      stored.
+                    properties:
+                      bucket:
+                        description: bucket is the name of an existing bucket.
+                        maxLength: 63
+                        minLength: 3
+                        pattern: ^[a-z0-9][a-z0-9.-]*[a-z0-9]$
+                        type: string
+                      credentialsSecret:
+                        description: |-
+                          credentialsSecret names a Secret in the cluster's namespace with the
+                          keys AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      endpoint:
+                        description: |-
+                          endpoint is the URL of an S3-compatible store such as MinIO or Ceph.
+                          Leave it unset for Amazon S3.
+                        maxLength: 512
+                        pattern: ^https?://[^\s/]+(/\S*)?$
+                        type: string
+                      forcePathStyle:
+                        description: |-
+                          forcePathStyle addresses the bucket as host/bucket instead of
+                          bucket.host, which most S3-compatible stores need.
+                        type: boolean
+                      path:
+                        description: |-
+                          path is where in the bucket this cluster's backups live, without
+                          leading or trailing slashes. It defaults to <namespace>/<cluster name>.
+                          Two clusters must not share a path.
+                        maxLength: 512
+                        pattern: ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$
+                        type: string
+                        x-kubernetes-validations:
+                        - message: path must not contain . or .. segments
+                          rule: '!self.split(''/'').exists(s, s == ''.'' || s == ''..'')'
+                      region:
+                        description: region is the bucket's region. Leave it unset
+                          for stores that have none.
+                        maxLength: 64
+                        type: string
+                      type:
+                        default: s3
+                        description: |-
+                          type is the kind of store. Only "s3" is supported; it covers Amazon S3
+                          and any store that speaks its API.
+                        enum:
+                        - s3
+                        type: string
+                    required:
+                    - bucket
+                    - credentialsSecret
+                    type: object
                   enabled:
-                    description: enabled turns the scheduled backup CronJob on or
-                      off.
+                    description: |-
+                      enabled turns backups on. WAL archiving starts as soon as it is set;
+                      base backups then run on schedule. It requires destination.
                     type: boolean
+                  encryption:
+                    description: encryption encrypts backups and WAL before they leave
+                      the pod.
+                    properties:
+                      keySecret:
+                        description: |-
+                          keySecret names a Secret in the cluster's namespace whose
+                          "libsodium-key" entry holds a 32-byte key written as 64 hexadecimal
+                          characters. The operator never creates or changes it.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                    required:
+                    - keySecret
+                    type: object
+                  retention:
+                    default: {}
+                    description: retention says which backups to keep.
+                    properties:
+                      days:
+                        default: 14
+                        description: days is how far back, in days, a restore must
+                          be possible.
+                        format: int32
+                        maximum: 3650
+                        minimum: 1
+                        type: integer
+                      full:
+                        default: 7
+                        description: full is the smallest number of full base backups
+                          to keep.
+                        format: int32
+                        maximum: 365
+                        minimum: 1
+                        type: integer
+                    type: object
                   schedule:
                     description: |-
                       schedule is a standard 5-field cron expression (e.g. "0 2 * * *")
-                      describing when backups run.
+                      describing when base backups run. It is required when enabled is true.
+                    maxLength: 256
                     pattern: ^\S+\s+\S+\s+\S+\s+\S+\s+\S+$
                     type: string
+                  verification:
+                    description: |-
+                      verification restores the newest backup on a schedule to prove that it
+                      can be restored, and records how long that took.
+                    properties:
+                      enabled:
+                        description: enabled turns restore testing on. It requires
+                          backup.enabled.
+                        type: boolean
+                      schedule:
+                        description: |-
+                          schedule is a standard 5-field cron expression for the restore test.
+                          It is required when enabled is true.
+                        maxLength: 256
+                        pattern: ^\S+\s+\S+\s+\S+\s+\S+\s+\S+$
+                        type: string
+                    type: object
+                type: object
+              bootstrap:
+                description: |-
+                  bootstrap says how the cluster's data is first created. Leave it unset
+                  for an empty database. It can only be set when the cluster is created.
+                properties:
+                  recovery:
+                    description: |-
+                      recovery restores the cluster from another cluster's backups instead of
+                      starting empty. The new cluster gets its own new passwords and writes
+                      its own backups to its own path, never to the source's.
+                    properties:
+                      destination:
+                        description: |-
+                          destination is where the source's backups are. It is the source's
+                          backup destination, including the path it used, and credentialsSecret
+                          names a Secret in this cluster's namespace.
+                        properties:
+                          bucket:
+                            description: bucket is the name of an existing bucket.
+                            maxLength: 63
+                            minLength: 3
+                            pattern: ^[a-z0-9][a-z0-9.-]*[a-z0-9]$
+                            type: string
+                          credentialsSecret:
+                            description: |-
+                              credentialsSecret names a Secret in the cluster's namespace with the
+                              keys AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                          endpoint:
+                            description: |-
+                              endpoint is the URL of an S3-compatible store such as MinIO or Ceph.
+                              Leave it unset for Amazon S3.
+                            maxLength: 512
+                            pattern: ^https?://[^\s/]+(/\S*)?$
+                            type: string
+                          forcePathStyle:
+                            description: |-
+                              forcePathStyle addresses the bucket as host/bucket instead of
+                              bucket.host, which most S3-compatible stores need.
+                            type: boolean
+                          path:
+                            description: |-
+                              path is where in the bucket this cluster's backups live, without
+                              leading or trailing slashes. It defaults to <namespace>/<cluster name>.
+                              Two clusters must not share a path.
+                            maxLength: 512
+                            pattern: ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$
+                            type: string
+                            x-kubernetes-validations:
+                            - message: path must not contain . or .. segments
+                              rule: '!self.split(''/'').exists(s, s == ''.'' || s
+                                == ''..'')'
+                          region:
+                            description: region is the bucket's region. Leave it unset
+                              for stores that have none.
+                            maxLength: 64
+                            type: string
+                          type:
+                            default: s3
+                            description: |-
+                              type is the kind of store. Only "s3" is supported; it covers Amazon S3
+                              and any store that speaks its API.
+                            enum:
+                            - s3
+                            type: string
+                        required:
+                        - bucket
+                        - credentialsSecret
+                        type: object
+                      sourceCluster:
+                        description: sourceCluster is the name the backups were taken
+                          under.
+                        maxLength: 63
+                        minLength: 1
+                        type: string
+                      sourceNamespace:
+                        description: |-
+                          sourceNamespace is the namespace the source cluster ran in. It
+                          defaults to this cluster's namespace.
+                        maxLength: 63
+                        type: string
+                      targetTime:
+                        description: |-
+                          targetTime restores to this moment instead of the latest. It is a
+                          timestamp with a time zone.
+                        format: date-time
+                        type: string
+                    required:
+                    - destination
+                    - sourceCluster
+                    type: object
                 type: object
               ha:
                 default: {}
@@ -242,9 +448,75 @@ spec:
             - storage
             - version
             type: object
+            x-kubernetes-validations:
+            - message: bootstrap is set when the cluster is created and cannot be
+                added, changed or removed
+              rule: has(self.bootstrap) == has(oldSelf.bootstrap) && (!has(self.bootstrap)
+                || self.bootstrap == oldSelf.bootstrap)
           status:
             description: status defines the observed state of PostgresCluster
             properties:
+              backup:
+                description: backup reports what can be restored and how healthy backing
+                  up is.
+                properties:
+                  backupCount:
+                    description: backupCount is how many base backups exist.
+                    format: int32
+                    type: integer
+                  lastBackupName:
+                    description: lastBackupName is the newest base backup's name in
+                      the destination.
+                    type: string
+                  lastBackupSizeBytes:
+                    description: lastBackupSizeBytes is its compressed size.
+                    format: int64
+                    type: integer
+                  lastBackupTime:
+                    description: lastBackupTime is when the newest base backup finished.
+                    format: date-time
+                    type: string
+                  oldestRecoveryPoint:
+                    description: oldestRecoveryPoint is the earliest time a restore
+                      can reach.
+                    format: date-time
+                    type: string
+                  verification:
+                    description: verification is the outcome of the last restore test.
+                    properties:
+                      durationSeconds:
+                        description: |-
+                          durationSeconds is how long the last passing restore took, which is the
+                          measured time to recover.
+                        format: int64
+                        type: integer
+                      lastRunTime:
+                        description: lastRunTime is when the last restore test finished.
+                        format: date-time
+                        type: string
+                      lastSuccessTime:
+                        description: lastSuccessTime is when a restore test last passed.
+                        format: date-time
+                        type: string
+                      message:
+                        description: message describes a failure.
+                        type: string
+                    type: object
+                  walArchiving:
+                    description: walArchiving says whether WAL is reaching the destination.
+                    properties:
+                      lagBytes:
+                        description: lagBytes is how much WAL the primary has written
+                          that is not archived.
+                        format: int64
+                        type: integer
+                      lastArchivedTime:
+                        description: lastArchivedTime is when a WAL segment was last
+                          archived.
+                        format: date-time
+                        type: string
+                    type: object
+                type: object
               conditions:
                 description: |-
                   conditions represent the current state of the PostgresCluster resource.
@@ -253,7 +525,9 @@ spec:
                   Condition types:
                   - "Available": a Ready primary exists, so the cluster accepts reads and writes
                   - "Progressing": the resource is being created or updated
-                  - "Degraded": the most recent scheduled backup failed
+                  - "Degraded": a backup, WAL archiving or a restore test is unhealthy
+                  - "BackupHealthy": the newest base backup is no older than two scheduled intervals
+                  - "WALArchivingHealthy": WAL archiving keeps up with the primary's writes
                   - "ReplicationHealthy": exactly one primary, and every replica is streaming within the lag limit
                   - "FailoverInProgress": there is currently no primary, so a leader election is under way
 

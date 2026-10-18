@@ -54,9 +54,10 @@ var _ = Describe("PostgresCluster Webhook", func() {
 			Expect(err.Error()).To(ContainSubstring("spec.backup.schedule"))
 		})
 
-		It("admits create when backup is enabled with a schedule", func() {
+		It("admits create when backup is enabled with a schedule and a destination", func() {
 			obj.Spec.Backup.Enabled = true
-			obj.Spec.Backup.Schedule = "0 2 * * *"
+			obj.Spec.Backup.Schedule = nightlyCron
+			obj.Spec.Backup.Destination = testDestination()
 			_, err := validator.ValidateCreate(ctx, obj)
 			Expect(err).NotTo(HaveOccurred())
 		})
@@ -250,6 +251,15 @@ var _ = Describe("PostgresCluster Webhook", func() {
 			Expect(err).To(HaveOccurred())
 			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid error, got: %v", err)
 			Expect(err.Error()).To(ContainSubstring("spec.resources.limits[memory]"))
+		})
+
+		It("rejects backups with no destination, which the schema alone cannot express", func() {
+			c := newCluster("webhook-no-destination")
+			c.Spec.Backup = dbv1alpha1.BackupSpec{Enabled: true, Schedule: nightlyCron}
+			err := k8sClient.Create(ctx, c)
+			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid error, got: %v", err)
+			Expect(err.Error()).To(ContainSubstring("spec.backup.destination"))
 		})
 
 		It("admits a valid cluster, then rejects an update that drops the limit", func() {

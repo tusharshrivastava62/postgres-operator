@@ -64,7 +64,7 @@ var _ = Describe("PostgresCluster Controller", func() {
 						},
 						Backup: dbv1alpha1.BackupSpec{
 							Enabled:  true,
-							Schedule: "0 2 * * *",
+							Schedule: nightlyCron,
 						},
 					},
 				}
@@ -110,7 +110,7 @@ var _ = Describe("PostgresCluster Controller", func() {
 			backupNSName := types.NamespacedName{Name: resourceName + "-backup", Namespace: resourceNamespace}
 			cj := &batchv1.CronJob{}
 			Expect(k8sClient.Get(ctx, backupNSName, cj)).To(Succeed())
-			Expect(cj.Spec.Schedule).To(Equal("0 2 * * *"))
+			Expect(cj.Spec.Schedule).To(Equal(nightlyCron))
 			Expect(k8sClient.Get(ctx, backupNSName, &corev1.PersistentVolumeClaim{})).To(Succeed())
 
 			By("reporting status conditions - not yet available, no backup finished yet")

@@ -25,6 +25,9 @@ spec:
   backup:
     enabled: true
     schedule: "0 2 * * *"
+    destination:
+      bucket: my-database-backups
+      credentialsSecret: backup-s3
 ```
 
 Apply that, and the operator's reconcile loop takes it from there.

@@ -13,6 +13,7 @@ package v1alpha1
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -43,7 +44,10 @@ func SetupPostgresClusterWebhookWithManager(mgr ctrl.Manager) error {
 // shrink). Without it these were either unchecked or only caught as a
 // reconcile-time error, well after `kubectl apply` returned success. It also
 // emits non-blocking admission warnings for advice that shouldn't stop an
-// apply.
+// apply. The backup rules (a destination when backups are on, restore testing
+// needing backups, a restore target that is not in the future, and a cluster
+// not archiving into the backups it was restored from) are in
+// backup_validation.go.
 // +kubebuilder:webhook:path=/validate-db-youroperator-io-v1alpha1-postgrescluster,mutating=false,failurePolicy=fail,sideEffects=None,groups=db.youroperator.io,resources=postgresclusters,verbs=create;update,versions=v1alpha1,name=vpostgrescluster-v1alpha1.kb.io,admissionReviewVersions=v1
 
 // PostgresClusterCustomValidator struct is responsible for validating the PostgresCluster resource
@@ -64,7 +68,8 @@ func (v *PostgresClusterCustomValidator) ValidateCreate(_ context.Context, obj *
 		errs = append(errs, err)
 	}
 	errs = append(errs, validateResources(obj)...)
-	return warningsFor(obj), invalidError(obj, errs)
+	errs = append(errs, validateBackup(obj, time.Now())...)
+	return append(warningsFor(obj), backupWarnings(nil, obj)...), invalidError(obj, errs)
 }
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type PostgresCluster.
@@ -79,7 +84,8 @@ func (v *PostgresClusterCustomValidator) ValidateUpdate(_ context.Context, oldOb
 		errs = append(errs, err)
 	}
 	errs = append(errs, validateResources(newObj)...)
-	return warningsFor(newObj), invalidError(newObj, errs)
+	errs = append(errs, validateBackup(newObj, time.Now())...)
+	return append(warningsFor(newObj), backupWarnings(oldObj, newObj)...), invalidError(newObj, errs)
 }
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type PostgresCluster.

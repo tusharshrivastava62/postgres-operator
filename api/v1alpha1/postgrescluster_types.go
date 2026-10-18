@@ -18,6 +18,8 @@ import (
 )
 
 // PostgresClusterSpec defines the desired state of PostgresCluster
+//
+// +kubebuilder:validation:XValidation:rule="has(self.bootstrap) == has(oldSelf.bootstrap) && (!has(self.bootstrap) || self.bootstrap == oldSelf.bootstrap)",message="bootstrap is set when the cluster is created and cannot be added, changed or removed"
 type PostgresClusterSpec struct {
 	// instances is the number of PostgreSQL pods to run in the StatefulSet.
 	// +kubebuilder:validation:Minimum=1
@@ -64,6 +66,11 @@ type PostgresClusterSpec struct {
 	// +kubebuilder:default={}
 	// +optional
 	HA HASpec `json:"ha,omitzero"`
+
+	// bootstrap says how the cluster's data is first created. Leave it unset
+	// for an empty database. It can only be set when the cluster is created.
+	// +optional
+	Bootstrap *BootstrapSpec `json:"bootstrap,omitempty"`
 
 	// image overrides the container image used for the PostgreSQL pods. When
 	// unset, the operator picks its built-in image for spec.version. Either
@@ -129,18 +136,171 @@ type StorageSpec struct {
 	StorageClassName *string `json:"storageClassName,omitempty"`
 }
 
-// BackupSpec defines the scheduled backup configuration for a
-// PostgresCluster.
+// BackupSpec configures continuous WAL archiving and scheduled base backups,
+// which together allow a restore to any point in time since the oldest kept
+// base backup.
 type BackupSpec struct {
-	// enabled turns the scheduled backup CronJob on or off.
+	// enabled turns backups on. WAL archiving starts as soon as it is set;
+	// base backups then run on schedule. It requires destination.
 	// +optional
 	Enabled bool `json:"enabled,omitempty"`
 
 	// schedule is a standard 5-field cron expression (e.g. "0 2 * * *")
-	// describing when backups run.
+	// describing when base backups run. It is required when enabled is true.
 	// +kubebuilder:validation:Pattern=`^\S+\s+\S+\s+\S+\s+\S+\s+\S+$`
+	// +kubebuilder:validation:MaxLength=256
 	// +optional
 	Schedule string `json:"schedule,omitempty"`
+
+	// destination is where backups and archived WAL are stored.
+	// +optional
+	Destination *BackupDestination `json:"destination,omitempty"`
+
+	// encryption encrypts backups and WAL before they leave the pod.
+	// +optional
+	Encryption *BackupEncryption `json:"encryption,omitempty"`
+
+	// retention says which backups to keep.
+	// +kubebuilder:default={}
+	// +optional
+	Retention BackupRetention `json:"retention,omitzero"`
+
+	// verification restores the newest backup on a schedule to prove that it
+	// can be restored, and records how long that took.
+	// +optional
+	Verification BackupVerification `json:"verification,omitzero"`
+}
+
+// BackupDestination is an S3 or S3-compatible bucket.
+type BackupDestination struct {
+	// type is the kind of store. Only "s3" is supported; it covers Amazon S3
+	// and any store that speaks its API.
+	// +kubebuilder:validation:Enum=s3
+	// +kubebuilder:default=s3
+	// +optional
+	Type string `json:"type,omitempty"`
+
+	// bucket is the name of an existing bucket.
+	// +kubebuilder:validation:MinLength=3
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9][a-z0-9.-]*[a-z0-9]$`
+	// +kubebuilder:validation:Required
+	Bucket string `json:"bucket"`
+
+	// region is the bucket's region. Leave it unset for stores that have none.
+	// +kubebuilder:validation:MaxLength=64
+	// +optional
+	Region string `json:"region,omitempty"`
+
+	// endpoint is the URL of an S3-compatible store such as MinIO or Ceph.
+	// Leave it unset for Amazon S3.
+	// +kubebuilder:validation:Pattern=`^https?://[^\s/]+(/\S*)?$`
+	// +kubebuilder:validation:MaxLength=512
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+
+	// forcePathStyle addresses the bucket as host/bucket instead of
+	// bucket.host, which most S3-compatible stores need.
+	// +optional
+	ForcePathStyle bool `json:"forcePathStyle,omitempty"`
+
+	// path is where in the bucket this cluster's backups live, without
+	// leading or trailing slashes. It defaults to <namespace>/<cluster name>.
+	// Two clusters must not share a path.
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$`
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:XValidation:rule="!self.split('/').exists(s, s == '.' || s == '..')",message="path must not contain . or .. segments"
+	// +optional
+	Path string `json:"path,omitempty"`
+
+	// credentialsSecret names a Secret in the cluster's namespace with the
+	// keys AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Required
+	CredentialsSecret string `json:"credentialsSecret"`
+}
+
+// BackupEncryption names the key that encrypts backups. Losing it makes the
+// backups unreadable, and nothing can recover them.
+type BackupEncryption struct {
+	// keySecret names a Secret in the cluster's namespace whose
+	// "libsodium-key" entry holds a 32-byte key written as 64 hexadecimal
+	// characters. The operator never creates or changes it.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Required
+	KeySecret string `json:"keySecret"`
+}
+
+// BackupRetention keeps the newest backups and everything recent enough to
+// restore to. Both limits apply: a backup is deleted only when more than
+// full backups exist and it is older than days.
+type BackupRetention struct {
+	// full is the smallest number of full base backups to keep.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=365
+	// +kubebuilder:default=7
+	// +optional
+	Full int32 `json:"full,omitempty"`
+
+	// days is how far back, in days, a restore must be possible.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=3650
+	// +kubebuilder:default=14
+	// +optional
+	Days int32 `json:"days,omitempty"`
+}
+
+// BackupVerification configures restore testing.
+type BackupVerification struct {
+	// enabled turns restore testing on. It requires backup.enabled.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// schedule is a standard 5-field cron expression for the restore test.
+	// It is required when enabled is true.
+	// +kubebuilder:validation:Pattern=`^\S+\s+\S+\s+\S+\s+\S+\s+\S+$`
+	// +kubebuilder:validation:MaxLength=256
+	// +optional
+	Schedule string `json:"schedule,omitempty"`
+}
+
+// BootstrapSpec chooses how a new cluster gets its data.
+type BootstrapSpec struct {
+	// recovery restores the cluster from another cluster's backups instead of
+	// starting empty. The new cluster gets its own new passwords and writes
+	// its own backups to its own path, never to the source's.
+	// +optional
+	Recovery *RecoverySpec `json:"recovery,omitempty"`
+}
+
+// RecoverySpec describes the backups to restore from. The new cluster must
+// use the same PostgreSQL major version as the source, since backups are
+// stored per major version.
+type RecoverySpec struct {
+	// sourceCluster is the name the backups were taken under.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Required
+	SourceCluster string `json:"sourceCluster"`
+
+	// sourceNamespace is the namespace the source cluster ran in. It
+	// defaults to this cluster's namespace.
+	// +kubebuilder:validation:MaxLength=63
+	// +optional
+	SourceNamespace string `json:"sourceNamespace,omitempty"`
+
+	// destination is where the source's backups are. It is the source's
+	// backup destination, including the path it used, and credentialsSecret
+	// names a Secret in this cluster's namespace.
+	// +kubebuilder:validation:Required
+	Destination BackupDestination `json:"destination"`
+
+	// targetTime restores to this moment instead of the latest. It is a
+	// timestamp with a time zone.
+	// +optional
+	TargetTime *metav1.Time `json:"targetTime,omitempty"`
 }
 
 // PostgresClusterStatus defines the observed state of PostgresCluster.
@@ -173,13 +333,19 @@ type PostgresClusterStatus struct {
 	// +optional
 	Image string `json:"image,omitempty"`
 
+	// backup reports what can be restored and how healthy backing up is.
+	// +optional
+	Backup BackupStatus `json:"backup,omitzero"`
+
 	// conditions represent the current state of the PostgresCluster resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//
 	// Condition types:
 	// - "Available": a Ready primary exists, so the cluster accepts reads and writes
 	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the most recent scheduled backup failed
+	// - "Degraded": a backup, WAL archiving or a restore test is unhealthy
+	// - "BackupHealthy": the newest base backup is no older than two scheduled intervals
+	// - "WALArchivingHealthy": WAL archiving keeps up with the primary's writes
 	// - "ReplicationHealthy": exactly one primary, and every replica is streaming within the lag limit
 	// - "FailoverInProgress": there is currently no primary, so a leader election is under way
 	//
@@ -188,6 +354,68 @@ type PostgresClusterStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// BackupStatus is what the operator last observed in the backup destination.
+type BackupStatus struct {
+	// lastBackupTime is when the newest base backup finished.
+	// +optional
+	LastBackupTime *metav1.Time `json:"lastBackupTime,omitempty"`
+
+	// lastBackupName is the newest base backup's name in the destination.
+	// +optional
+	LastBackupName string `json:"lastBackupName,omitempty"`
+
+	// lastBackupSizeBytes is its compressed size.
+	// +optional
+	LastBackupSizeBytes int64 `json:"lastBackupSizeBytes,omitempty"`
+
+	// backupCount is how many base backups exist.
+	// +optional
+	BackupCount int32 `json:"backupCount,omitempty"`
+
+	// oldestRecoveryPoint is the earliest time a restore can reach.
+	// +optional
+	OldestRecoveryPoint *metav1.Time `json:"oldestRecoveryPoint,omitempty"`
+
+	// walArchiving says whether WAL is reaching the destination.
+	// +optional
+	WALArchiving WALArchivingStatus `json:"walArchiving,omitzero"`
+
+	// verification is the outcome of the last restore test.
+	// +optional
+	Verification VerificationStatus `json:"verification,omitzero"`
+}
+
+// WALArchivingStatus describes how far WAL archiving is behind.
+type WALArchivingStatus struct {
+	// lastArchivedTime is when a WAL segment was last archived.
+	// +optional
+	LastArchivedTime *metav1.Time `json:"lastArchivedTime,omitempty"`
+
+	// lagBytes is how much WAL the primary has written that is not archived.
+	// +optional
+	LagBytes int64 `json:"lagBytes,omitempty"`
+}
+
+// VerificationStatus is the outcome of restore testing.
+type VerificationStatus struct {
+	// lastRunTime is when the last restore test finished.
+	// +optional
+	LastRunTime *metav1.Time `json:"lastRunTime,omitempty"`
+
+	// lastSuccessTime is when a restore test last passed.
+	// +optional
+	LastSuccessTime *metav1.Time `json:"lastSuccessTime,omitempty"`
+
+	// durationSeconds is how long the last passing restore took, which is the
+	// measured time to recover.
+	// +optional
+	DurationSeconds int64 `json:"durationSeconds,omitempty"`
+
+	// message describes a failure.
+	// +optional
+	Message string `json:"message,omitempty"`
 }
 
 // +kubebuilder:object:root=true

@@ -1,4 +1,6 @@
 ## Append samples of your project ##
 resources:
 - db_v1alpha1_postgrescluster.yaml
+- db_v1alpha1_postgrescluster_backup.yaml
+- db_v1alpha1_postgrescluster_restore.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

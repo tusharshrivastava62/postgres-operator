@@ -1,0 +1,36 @@
+# A new cluster restored from another cluster's backups, to a chosen moment.
+# The source cluster's backups are only read. This cluster writes its own
+# backups to its own path, and gets its own new passwords.
+apiVersion: db.youroperator.io/v1alpha1
+kind: PostgresCluster
+metadata:
+  labels:
+    app.kubernetes.io/name: postgres-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: postgrescluster-restored
+spec:
+  instances: 3
+  version: "17"            # must match the source cluster's version
+  storage:
+    size: 10Gi
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      memory: "1Gi"
+  bootstrap:
+    recovery:
+      sourceCluster: postgrescluster-backup-sample
+      destination:         # where the source kept its backups
+        bucket: my-database-backups
+        region: eu-west-1
+        credentialsSecret: backup-s3
+      targetTime: "2026-10-18T07:49:27Z"    # leave out to restore to the latest
+  backup:
+    enabled: true
+    schedule: "0 2 * * *"
+    destination:
+      bucket: my-database-backups
+      region: eu-west-1
+      credentialsSecret: backup-s3

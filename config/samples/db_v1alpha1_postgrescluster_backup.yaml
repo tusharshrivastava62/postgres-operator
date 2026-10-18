@@ -1,0 +1,42 @@
+# A cluster with continuous WAL archiving, a nightly base backup, a weekly
+# restore test, and encrypted backups. Create the two Secrets first:
+#
+#   kubectl create secret generic backup-s3 \
+#     --from-literal=AWS_ACCESS_KEY_ID=... --from-literal=AWS_SECRET_ACCESS_KEY=...
+#   kubectl create secret generic backup-key \
+#     --from-literal=libsodium-key="$(openssl rand -hex 32)"
+#
+# Keep a copy of the key somewhere safe: without it the backups cannot be read.
+apiVersion: db.youroperator.io/v1alpha1
+kind: PostgresCluster
+metadata:
+  labels:
+    app.kubernetes.io/name: postgres-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: postgrescluster-backup-sample
+spec:
+  instances: 3
+  version: "17"
+  storage:
+    size: 10Gi
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      memory: "1Gi"
+  backup:
+    enabled: true
+    schedule: "0 2 * * *"
+    destination:
+      bucket: my-database-backups
+      region: eu-west-1
+      credentialsSecret: backup-s3
+    encryption:
+      keySecret: backup-key
+    retention:
+      full: 7
+      days: 14
+    verification:
+      enabled: true
+      schedule: "0 4 * * 0"
