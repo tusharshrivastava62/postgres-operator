@@ -60,7 +60,10 @@ Apply that, and the operator's reconcile loop takes it from there.
   cluster to create it from another cluster's backups, to the latest moment or to a
   `targetTime`. The source is only read. The new cluster gets its own passwords and writes its
   own backups to its own path, and the API refuses a cluster that would archive into the path it
-  was restored from. It needs the same PostgreSQL major version as the source.
+  was restored from. It needs the same PostgreSQL major version as the source. Before any pod is
+  created, the operator reads the source's backups and reports in the `RecoverySourceReady`
+  condition whether one can be started from, so a `targetTime` earlier than the oldest backup, a
+  wrong path or a wrong key is a message in the status instead of a pod that keeps restarting.
 - **Proves its backups restore.** With `backup.verification` on, a weekly (or any schedule)
   job restores the newest base backup into scratch space, starts PostgreSQL on a local socket
   that nothing else can reach, lets it replay the archived WAL, reads every database, and

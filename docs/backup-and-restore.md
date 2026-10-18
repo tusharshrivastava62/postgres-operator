@@ -113,8 +113,30 @@ see `config/samples/db_v1alpha1_postgrescluster_restore.yaml`.
 5. **Move traffic** to the new cluster's Service once you are satisfied, and delete the old one
    (its volumes and Secret stay until you delete them; see the README).
 
-A target time earlier than the oldest base backup cannot be restored, and the new cluster will not
-come up. The message is not friendly yet, so check step 1 first.
+Before creating any pod, the operator reads the source's backups and checks that one can be
+started from. The result is the `RecoverySourceReady` condition:
+
+```bash
+kubectl get postgrescluster my-database-restored \
+  -o jsonpath='{.status.conditions[?(@.type=="RecoverySourceReady")]}'
+```
+
+| Reason | Meaning | What to do |
+|---|---|---|
+| `Checking` | the check is running | wait |
+| `BackupFound` | `True`; the message names the base backup the restore starts from | nothing |
+| `TargetBeforeOldestBackup` | `targetTime` is earlier than every base backup, so there is nothing to start from | the message gives the earliest usable time; `spec.bootstrap` cannot be edited, so delete the new cluster and create it again with a later `targetTime` |
+| `NoBackups` | no base backup exists at the source's path | check `sourceCluster`, `sourceNamespace`, the bucket and `path`, and the major version |
+| `SourceUnreadable` | the bucket, credentials or key do not work (the message has the error) | fix the destination or the Secrets; the check repeats every 2 minutes and the restore carries on once it passes |
+
+While the condition is not `True`, `Progressing` is `False` with reason `RecoverySourceProblem`
+and the operator creates no StatefulSet, so no pod can crash-loop. The check runs only before the
+cluster is first created; a cluster that exists is never held back by it, so the source bucket
+changing later cannot stop a member from restarting.
+
+The check does not tell whether archived WAL reaches as far as `targetTime`. If the WAL ends
+before the target, PostgreSQL refuses to finish recovery and the pod restarts; this is not
+reported in a condition yet. Pick a target inside the source's archived WAL.
 
 ## Measuring recovery time
 
@@ -166,6 +188,8 @@ errors.
 - *The cluster does not start after you enabled backups*: the condition message says which Secret
   or key is missing or malformed. Fix the Secret; no pod restart is needed beyond what the
   operator does.
-- *A restore starts but never becomes ready*: read the first pod's log. The usual causes are a
-  wrong `destination.path`, a different major `version`, a missing or wrong encryption key, or a
-  `targetTime` outside the recovery window.
+- *A restore does not start*: read the `RecoverySourceReady` condition (see the table above); it
+  names a wrong `destination.path`, a different major `version`, a missing or wrong encryption
+  key, or a `targetTime` before the oldest backup.
+- *A restore starts but never becomes ready*: the backups were found, so read the first pod's
+  log. A likely cause is WAL missing between the base backup and the target.

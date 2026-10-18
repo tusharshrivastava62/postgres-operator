@@ -70,7 +70,7 @@ type PostgresClusterReconciler struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
 //
@@ -177,6 +177,16 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		if err := r.Status().Update(ctx, cluster); err != nil {
 			return ctrl.Result{}, fmt.Errorf("recording image: %w", err)
 		}
+	}
+
+	// A cluster restored from backups is not created until the backups have
+	// been checked, see reconcileRecoveryCheck.
+	proceed, wait, err := r.reconcileRecoveryCheck(ctx, cluster, image)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("checking the backups to restore from: %w", err)
+	}
+	if !proceed {
+		return ctrl.Result{RequeueAfter: wait}, nil
 	}
 
 	if err := r.reconcileSecret(ctx, cluster); err != nil {

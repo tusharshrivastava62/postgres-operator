@@ -197,9 +197,33 @@ func walgClientEnv(cluster *dbv1alpha1.PostgresCluster) []corev1.EnvVar {
 	if backup.Destination == nil {
 		return nil
 	}
-	dest := backup.Destination
+	return walgEnvFor(backupPrefix(backup.Destination, cluster.Namespace, cluster.Name, cluster.Spec.Version),
+		backup.Destination, backup.Encryption)
+}
+
+// recoveryClientEnv is walgClientEnv for the backups a cluster is restored
+// from, which live where the source cluster put them.
+func recoveryClientEnv(cluster *dbv1alpha1.PostgresCluster) []corev1.EnvVar {
+	recovery := cluster.Spec.Recovery()
+	if recovery == nil {
+		return nil
+	}
+	return walgEnvFor(recoveryPrefix(cluster), &recovery.Destination, recovery.Encryption)
+}
+
+// recoveryPrefix is the location of the backups a cluster is restored from.
+func recoveryPrefix(cluster *dbv1alpha1.PostgresCluster) string {
+	recovery := cluster.Spec.Recovery()
+	namespace := recovery.SourceNamespace
+	if namespace == "" {
+		namespace = cluster.Namespace
+	}
+	return backupPrefix(&recovery.Destination, namespace, recovery.SourceCluster, cluster.Spec.Version)
+}
+
+func walgEnvFor(prefix string, dest *dbv1alpha1.BackupDestination, enc *dbv1alpha1.BackupEncryption) []corev1.EnvVar {
 	env := []corev1.EnvVar{
-		{Name: "WALG_S3_PREFIX", Value: backupPrefix(dest, cluster.Namespace, cluster.Name, cluster.Spec.Version)},
+		{Name: "WALG_S3_PREFIX", Value: prefix},
 		{Name: secretKeyAccessKey, ValueFrom: secretRef(dest.CredentialsSecret, secretKeyAccessKey)},
 		{Name: secretKeySecretKey, ValueFrom: secretRef(dest.CredentialsSecret, secretKeySecretKey)},
 	}
@@ -212,9 +236,9 @@ func walgClientEnv(cluster *dbv1alpha1.PostgresCluster) []corev1.EnvVar {
 			corev1.EnvVar{Name: "AWS_S3_FORCE_PATH_STYLE", Value: fmt.Sprint(dest.ForcePathStyle)},
 			corev1.EnvVar{Name: "WALG_DISABLE_S3_SSE", Value: envTrue})
 	}
-	if backup.Encryption != nil {
+	if enc != nil {
 		env = append(env,
-			corev1.EnvVar{Name: "WALG_LIBSODIUM_KEY", ValueFrom: secretRef(backup.Encryption.KeySecret, secretKeyEncKey)},
+			corev1.EnvVar{Name: "WALG_LIBSODIUM_KEY", ValueFrom: secretRef(enc.KeySecret, secretKeyEncKey)},
 			corev1.EnvVar{Name: "WALG_LIBSODIUM_KEY_TRANSFORM", Value: keyTransformHex})
 	}
 	return env
@@ -238,14 +262,10 @@ func recoveryEnv(cluster *dbv1alpha1.PostgresCluster) []corev1.EnvVar {
 		return nil
 	}
 	dest := &recovery.Destination
-	sourceNamespace := recovery.SourceNamespace
-	if sourceNamespace == "" {
-		sourceNamespace = cluster.Namespace
-	}
 	env := []corev1.EnvVar{
 		{Name: "CLONE_METHOD", Value: "CLONE_WITH_WALG"},
 		{Name: "CLONE_SCOPE", Value: recovery.SourceCluster},
-		{Name: "CLONE_WALG_S3_PREFIX", Value: backupPrefix(dest, sourceNamespace, recovery.SourceCluster, cluster.Spec.Version)},
+		{Name: "CLONE_WALG_S3_PREFIX", Value: recoveryPrefix(cluster)},
 		{Name: "CLONE_AWS_ACCESS_KEY_ID", ValueFrom: secretRef(dest.CredentialsSecret, secretKeyAccessKey)},
 		{Name: "CLONE_AWS_SECRET_ACCESS_KEY", ValueFrom: secretRef(dest.CredentialsSecret, secretKeySecretKey)},
 	}

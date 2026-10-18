@@ -572,6 +572,43 @@ spec:
 			waitAvailable(latestName)
 			Expect(rowsOf(latestName + "-0")).To(Equal([]string{rowBeforeBackup, rowBeforeTarget, rowAfterTarget}))
 		})
+
+		It("says so in the conditions, and creates no pods, when the target is before the oldest backup", func() {
+			const earlyName = "restored-early"
+			_, err := kubectlIn(restoreManifest(earlyName, "2020-01-01T00:00:00Z"), "apply", "-f", "-")
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { _, _ = inCluster("delete", "postgrescluster", earlyName, "--wait=false") })
+
+			field := func(path string) (string, error) {
+				return inCluster("get", "postgrescluster", earlyName, "-o", "jsonpath={"+path+"}")
+			}
+			sourceReady := `.status.conditions[?(@.type=="RecoverySourceReady")]`
+			Eventually(func(g Gomega) {
+				reason, err := field(sourceReady + ".reason")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(reason).To(Equal("TargetBeforeOldestBackup"))
+			}, 3*time.Minute, pollEvery).Should(Succeed())
+
+			message, err := field(sourceReady + ".message")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(message).To(ContainSubstring("targetTime 2020-01-01T00:00:00Z is earlier than the oldest base backup"))
+			Expect(message).To(ContainSubstring("delete this cluster and create it again"))
+			status, err := field(sourceReady + ".status")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(status).To(Equal("False"))
+			reason, err := field(`.status.conditions[?(@.type=="Progressing")].reason`)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reason).To(Equal("RecoverySourceProblem"))
+
+			By("having created nothing that could crash-loop")
+			pods, err := inCluster("get", "pods", "-o", "name",
+				"-l", "app.kubernetes.io/instance="+earlyName+",app.kubernetes.io/component=postgres")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pods).To(BeEmpty())
+			sts, err := inCluster("get", "statefulset", "-o", "name")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(sts).NotTo(ContainSubstring(earlyName))
+		})
 	})
 
 	It("proves that the newest backup restores, and reports how long it took", func() {

@@ -44,6 +44,12 @@ var backupStatusScript string
 //go:embed scripts/restore_verify.py
 var restoreVerifyScript string
 
+// restoreCheckScript checks, before a restored cluster's first pod starts,
+// that the backups it names can be restored from; see the file.
+//
+//go:embed scripts/restore_check.py
+var restoreCheckScript string
+
 const (
 	componentBackupStatus  = "backup-status"
 	componentRestoreVerify = "restore-verify"
@@ -71,6 +77,15 @@ const (
 	conditionWALArchivingHealthy = "WALArchivingHealthy"
 	conditionDegraded            = "Degraded"
 )
+
+// backupScripts is the content of the scripts ConfigMap.
+func backupScripts() map[string]string {
+	return map[string]string{
+		"backup_status.py":  backupStatusScript,
+		"restore_verify.py": restoreVerifyScript,
+		"restore_check.py":  restoreCheckScript,
+	}
+}
 
 func backupStatusName(cluster *dbv1alpha1.PostgresCluster) string {
 	return cluster.Name + "-backup-status"
@@ -125,10 +140,7 @@ func (r *PostgresClusterReconciler) reconcileBackupJobs(
 	cm := &corev1.ConfigMap{ObjectMeta: scripts}
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
 		cm.Labels = backupStatusLabels(cluster)
-		cm.Data = map[string]string{
-			"backup_status.py":  backupStatusScript,
-			"restore_verify.py": restoreVerifyScript,
-		}
+		cm.Data = backupScripts()
 		return controllerutil.SetControllerReference(cluster, cm, r.Scheme)
 	}); err != nil {
 		return fmt.Errorf("script ConfigMap: %w", err)
@@ -203,7 +215,7 @@ func backupStatusCronJobSpec(cluster *dbv1alpha1.PostgresCluster, image string) 
 							Name:            statusContainerName,
 							Image:           image,
 							ImagePullPolicy: corev1.PullIfNotPresent,
-							Command:         []string{"python3", "/scripts/backup_status.py"},
+							Command:         []string{scriptInterpreter, scriptsDir + "/backup_status.py"},
 							Env:             env,
 							SecurityContext: &corev1.SecurityContext{
 								AllowPrivilegeEscalation: ptr.To(false),
@@ -216,7 +228,7 @@ func backupStatusCronJobSpec(cluster *dbv1alpha1.PostgresCluster, image string) 
 								},
 								Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")},
 							},
-							VolumeMounts: []corev1.VolumeMount{{Name: scriptVolumeName, MountPath: "/scripts", ReadOnly: true}},
+							VolumeMounts: []corev1.VolumeMount{{Name: scriptVolumeName, MountPath: scriptsDir, ReadOnly: true}},
 						}},
 						Volumes: []corev1.Volume{{
 							Name: scriptVolumeName,

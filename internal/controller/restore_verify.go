@@ -92,7 +92,7 @@ func restoreVerifyCronJobSpec(cluster *dbv1alpha1.PostgresCluster, image string)
 							Name:            verifyContainerName,
 							Image:           image,
 							ImagePullPolicy: corev1.PullIfNotPresent,
-							Command:         []string{"python3", "/scripts/restore_verify.py"},
+							Command:         []string{scriptInterpreter, scriptsDir + "/restore_verify.py"},
 							Env:             env,
 							SecurityContext: &corev1.SecurityContext{
 								AllowPrivilegeEscalation: ptr.To(false),
@@ -106,7 +106,7 @@ func restoreVerifyCronJobSpec(cluster *dbv1alpha1.PostgresCluster, image string)
 								Limits: corev1.ResourceList{corev1.ResourceMemory: memory},
 							},
 							VolumeMounts: []corev1.VolumeMount{
-								{Name: scriptVolumeName, MountPath: "/scripts", ReadOnly: true},
+								{Name: scriptVolumeName, MountPath: scriptsDir, ReadOnly: true},
 								{Name: restoreVolumeName, MountPath: "/restore"},
 								{Name: shmVolumeName, MountPath: "/dev/shm"},
 							},

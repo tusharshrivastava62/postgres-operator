@@ -43,7 +43,9 @@ const testRegion = "eu-west-1"
 // Names shared by the backup and restore specs.
 const (
 	sourceName = "orders"
-	teamPath   = "team/orders-db"
+	// sourceNamespace is where the source cluster in these tests runs.
+	sourceNamespace = "prod"
+	teamPath        = "team/orders-db"
 )
 
 const validHexKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -58,7 +60,7 @@ func envMap(env []corev1.EnvVar) map[string]corev1.EnvVar {
 
 func backupCluster() *dbv1alpha1.PostgresCluster {
 	return &dbv1alpha1.PostgresCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: sourceName, Namespace: "prod"},
+		ObjectMeta: metav1.ObjectMeta{Name: sourceName, Namespace: sourceNamespace},
 		Spec: dbv1alpha1.PostgresClusterSpec{
 			Version: "17",
 			Backup: dbv1alpha1.BackupSpec{
@@ -170,7 +172,7 @@ func mustEnv(c *dbv1alpha1.PostgresCluster) []corev1.EnvVar {
 
 func recoveryCluster() *dbv1alpha1.PostgresCluster {
 	c := &dbv1alpha1.PostgresCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "orders-restored", Namespace: "prod"},
+		ObjectMeta: metav1.ObjectMeta{Name: "orders-restored", Namespace: sourceNamespace},
 		Spec: dbv1alpha1.PostgresClusterSpec{
 			Version: "17",
 			Bootstrap: &dbv1alpha1.BootstrapSpec{Recovery: &dbv1alpha1.RecoverySpec{
@@ -409,6 +411,8 @@ var _ = Describe("Backups through the reconciler", func() {
 				Destination:   dbv1alpha1.BackupDestination{Bucket: testBucket, Region: testRegion, CredentialsSecret: name + "-src"},
 			}}
 		})
+		reconcileOnce(name)
+		finishRestoreCheck(ctx, name, okRestoreCheck, time.Now())
 		reconcileOnce(name)
 
 		env := stsEnv(name)
