@@ -185,6 +185,75 @@ func clusterSpecs() {
 		}, time.Minute, pollEvery).Should(Succeed())
 	})
 
+	It("applies the compliance rules through the real webhook", func() {
+		// complianceManifest is a cluster with backups and a compliance block.
+		// None of these are stored: the API server only runs them through
+		// admission.
+		complianceManifest := func(auditDestination string) string {
+			return fmt.Sprintf(`apiVersion: db.youroperator.io/v1alpha1
+kind: PostgresCluster
+metadata:
+  name: compliance-check
+  namespace: %[1]s
+spec:
+  version: "17"
+  instances: 1
+  storage:
+    size: 1Gi
+  resources:
+    limits:
+      memory: 1Gi
+  backup:
+    enabled: true
+    schedule: "0 2 * * *"
+    destination:
+      bucket: %[2]s
+      endpoint: %[3]s
+      forcePathStyle: true
+      credentialsSecret: backup-s3
+  compliance:
+    standard: hipaa
+    auditLogs:
+%[4]s`, clusterNamespace, backupBucket, objectStoreEndpoint, auditDestination)
+		}
+		destination := func(bucket, path string, extra string) string {
+			return fmt.Sprintf(`      destination:
+        bucket: %s
+        endpoint: %s
+        forcePathStyle: true
+        credentialsSecret: audit-s3
+        path: %s
+%s`, bucket, objectStoreEndpoint, path, extra)
+		}
+
+		By("refusing a standard with nowhere to send audit logs")
+		Eventually(func(g Gomega) {
+			out, err := kubectlDryRun(complianceManifest("      logParameters: false\n"))
+			g.Expect(err).To(HaveOccurred(), out)
+			// The webhook may not be serving yet; only its own rejection counts.
+			g.Expect(out).To(ContainSubstring("spec.compliance.auditLogs.destination"))
+		}, time.Minute, pollEvery).Should(Succeed())
+
+		By("refusing audit logs inside the cluster's backup path")
+		inside := destination(backupBucket, clusterNamespace+"/compliance-check/audit", "")
+		out, err := kubectlDryRun(complianceManifest(inside))
+		Expect(err).To(HaveOccurred(), out)
+		Expect(out).To(ContainSubstring("spec.compliance.auditLogs.destination.path"))
+		Expect(out).To(ContainSubstring("backups"))
+
+		By("accepting a separate path, and warning that logged parameters are written in clear text")
+		logged := destination(backupBucket, "audit-logs/compliance-check", "      logParameters: true\n")
+		out, err = kubectlDryRun(complianceManifest(logged))
+		Expect(err).NotTo(HaveOccurred(), out)
+		Expect(out).To(ContainSubstring("Warning:"))
+		Expect(out).To(ContainSubstring("clear text"))
+
+		By("accepting the same path in another bucket without a warning")
+		out, err = kubectlDryRun(complianceManifest(destination("audit-bucket", clusterNamespace+"/compliance-check", "")))
+		Expect(err).NotTo(HaveOccurred(), out)
+		Expect(out).NotTo(ContainSubstring("Warning:"))
+	})
+
 	It("brings up three instances with one primary and two streaming replicas", func() {
 		Eventually(func(g Gomega) {
 			_, err := kubectlIn(clusterManifest(), "apply", "-f", "-")

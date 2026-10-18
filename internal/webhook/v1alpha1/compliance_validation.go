@@ -1,0 +1,88 @@
+/*
+Copyright 2026.
+
+Licensed under the Business Source License 1.1 (the "License"). You may not
+use this file except in compliance with the License, a copy of which is in the
+LICENSE file at the root of this repository. Production use requires a
+commercial license from the Licensor. On the Change Date (2030-10-17) the
+work becomes available under the Change License (Apache-2.0).
+*/
+
+package v1alpha1
+
+import (
+	"fmt"
+
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	dbv1alpha1 "github.com/tusharshrivastava62/postgres-operator/api/v1alpha1"
+)
+
+// validateCompliance holds the compliance rules the CRD schema cannot express,
+// because they relate one field to another or to the backup settings.
+func validateCompliance(cluster *dbv1alpha1.PostgresCluster) field.ErrorList {
+	compliance := cluster.Spec.Compliance
+	if compliance == nil {
+		return nil
+	}
+	var errs field.ErrorList
+	destPath := field.NewPath("spec", "compliance", "auditLogs", "destination")
+	dest := compliance.AuditLogs.Destination
+
+	if dest == nil {
+		return field.ErrorList{field.Required(destPath,
+			"must be set when spec.compliance is set: audit logs need somewhere to go")}
+	}
+	errs = append(errs, validateRegion(destPath, dest)...)
+
+	// Audit logs in the backups' path would be caught by anything that manages
+	// the backups there, such as a lifecycle rule for their expiry, and a path
+	// inside another is caught the same way.
+	backup := cluster.Spec.Backup
+	if backup.Enabled && backup.Destination != nil && backup.Destination.SameStore(dest) {
+		own := backup.Destination.PathFor(cluster.Namespace, cluster.Name)
+		audit := compliance.AuditPathFor(cluster.Namespace, cluster.Name)
+		if dbv1alpha1.PathsOverlap(own, audit) {
+			errs = append(errs, field.Invalid(destPath.Child("path"), audit, fmt.Sprintf(
+				"must not be the same as, or inside, the path of this cluster's backups (%s): set a path that is separate from it", own)))
+		}
+	}
+	return errs
+}
+
+// complianceWarnings returns advice about compliance settings that are
+// allowed but worth a second look. old is nil on create.
+func complianceWarnings(old, cluster *dbv1alpha1.PostgresCluster) admission.Warnings {
+	var warnings admission.Warnings
+
+	if compliance := cluster.Spec.Compliance; compliance != nil && compliance.AuditLogs.LogParameters {
+		warnings = append(warnings,
+			"spec.compliance.auditLogs.logParameters is true: the values bound to statement parameters are written to the "+
+				"audit log in clear text, so any sensitive value a client sends will be in it")
+	}
+
+	if old != nil {
+		before, after := standardOf(old), standardOf(cluster)
+		if before != after {
+			warnings = append(warnings, fmt.Sprintf(
+				"the compliance standard changed from %s to %s: the database pods will be replaced one at a time, replicas "+
+					"first and the primary after a switchover, so writes are refused for a few seconds", describe(before), describe(after)))
+		}
+	}
+	return warnings
+}
+
+func standardOf(cluster *dbv1alpha1.PostgresCluster) string {
+	if cluster.Spec.Compliance == nil {
+		return ""
+	}
+	return cluster.Spec.Compliance.Standard
+}
+
+func describe(standard string) string {
+	if standard == "" {
+		return "none"
+	}
+	return fmt.Sprintf("%q", standard)
+}

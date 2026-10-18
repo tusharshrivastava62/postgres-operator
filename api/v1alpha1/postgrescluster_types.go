@@ -12,6 +12,7 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -72,6 +73,14 @@ type PostgresClusterSpec struct {
 	// +optional
 	Bootstrap *BootstrapSpec `json:"bootstrap,omitempty"`
 
+	// compliance applies a named preset of audit, logging and network
+	// settings and reports, in status, whether each of its controls holds in
+	// the running database. It configures and verifies; it does not make a
+	// cluster compliant with anything. Leave it unset for none. It can be set
+	// or changed on a running cluster, which replaces the pods one at a time.
+	// +optional
+	Compliance *ComplianceSpec `json:"compliance,omitempty"`
+
 	// image overrides the container image used for the PostgreSQL pods. When
 	// unset, the operator picks its built-in image for spec.version. Either
 	// way, the image actually in use is recorded in status.image, and an
@@ -82,6 +91,63 @@ type PostgresClusterSpec struct {
 	// +kubebuilder:validation:MaxLength=512
 	// +optional
 	Image string `json:"image,omitempty"`
+}
+
+// ComplianceSpec selects a preset and says where its audit logs go.
+type ComplianceSpec struct {
+	// standard is the preset to apply: "hipaa", "soc2" or "pci". Each sets
+	// which statement classes pgaudit logs and the default audit log
+	// retention, and decides which controls are checked.
+	// +kubebuilder:validation:Enum=hipaa;soc2;pci
+	// +kubebuilder:validation:Required
+	Standard string `json:"standard"`
+
+	// auditLogs says where audit logs are delivered and how long they are
+	// expected to be kept.
+	// +kubebuilder:default={}
+	// +optional
+	AuditLogs AuditLogsSpec `json:"auditLogs,omitzero"`
+
+	// network adjusts the NetworkPolicy the operator creates for the
+	// database pods.
+	// +optional
+	Network ComplianceNetworkSpec `json:"network,omitzero"`
+}
+
+// AuditLogsSpec is where audit logs are delivered.
+type AuditLogsSpec struct {
+	// destination is the S3 or S3-compatible bucket audit logs are uploaded
+	// to. It is required when spec.compliance is set. It must not share a
+	// path with the cluster's backups.
+	// +optional
+	Destination *BackupDestination `json:"destination,omitempty"`
+
+	// retentionDays is how long audit logs are expected to be kept. The
+	// operator does not enforce it: retention is a property of the bucket's
+	// own lifecycle rules, and the operator checks that they cover this many
+	// days. Leave it unset to use the standard's default.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=7300
+	// +optional
+	RetentionDays int32 `json:"retentionDays,omitempty"`
+
+	// logParameters makes pgaudit record the values bound to a statement's
+	// parameters. They are written in clear text, so any sensitive value a
+	// client sends ends up in the audit log. Leave it off unless the log's
+	// destination is protected to the same level as the database.
+	// +kubebuilder:default=false
+	// +optional
+	LogParameters bool `json:"logParameters,omitempty"`
+}
+
+// ComplianceNetworkSpec adjusts the cluster's NetworkPolicy.
+type ComplianceNetworkSpec struct {
+	// allowFrom lists additional peers that may connect to PostgreSQL. Pods
+	// labelled db.youroperator.io/client=true in the cluster's own namespace
+	// are always allowed.
+	// +kubebuilder:validation:MaxItems=20
+	// +optional
+	AllowFrom []networkingv1.NetworkPolicyPeer `json:"allowFrom,omitempty"`
 }
 
 // HASpec tunes failover behavior.
@@ -342,6 +408,11 @@ type PostgresClusterStatus struct {
 	// +optional
 	Backup BackupStatus `json:"backup,omitzero"`
 
+	// compliance reports which controls of the selected standard hold in the
+	// running cluster, as last observed.
+	// +optional
+	Compliance ComplianceStatus `json:"compliance,omitzero"`
+
 	// conditions represent the current state of the PostgresCluster resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//
@@ -353,12 +424,57 @@ type PostgresClusterStatus struct {
 	// - "WALArchivingHealthy": WAL archiving keeps up with the primary's writes
 	// - "ReplicationHealthy": exactly one primary, and every replica is streaming within the lag limit
 	// - "FailoverInProgress": there is currently no primary, so a leader election is under way
+	// - "ControlsMet": every control of the selected compliance standard is Met
 	//
 	// The status of each condition is one of True, False, or Unknown.
 	// +listType=map
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// ComplianceStatus is what the operator last observed about the controls of
+// the selected standard.
+type ComplianceStatus struct {
+	// standard is the preset the controls below were checked against.
+	// +optional
+	Standard string `json:"standard,omitempty"`
+
+	// lastChecked is when the controls were last read from the cluster.
+	// +optional
+	LastChecked *metav1.Time `json:"lastChecked,omitempty"`
+
+	// controls is the result for each control the preset checks.
+	// +listType=map
+	// +listMapKey=id
+	// +kubebuilder:validation:MaxItems=32
+	// +optional
+	Controls []ComplianceControl `json:"controls,omitempty"`
+}
+
+// ComplianceControl is one control and whether it held when last checked.
+type ComplianceControl struct {
+	// id names the control, for example "audit-logging".
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Required
+	ID string `json:"id"`
+
+	// status is Met when the evidence shows the control holds, NotMet when it
+	// shows it does not, and Unknown when it could not be checked. Unknown
+	// never counts as Met.
+	// +kubebuilder:validation:Enum=Met;NotMet;Unknown
+	// +kubebuilder:validation:Required
+	Status string `json:"status"`
+
+	// evidence is what was observed, in words.
+	// +kubebuilder:validation:MaxLength=1024
+	// +optional
+	Evidence string `json:"evidence,omitempty"`
+
+	// observedAt is when the evidence was read.
+	// +optional
+	ObservedAt *metav1.Time `json:"observedAt,omitempty"`
 }
 
 // BackupStatus is what the operator last observed in the backup destination.

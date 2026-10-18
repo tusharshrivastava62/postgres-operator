@@ -167,3 +167,13 @@ func clusterFieldOf(name, path string) (string, error) {
 func conditionOf(name, conditionType string) (string, error) {
 	return clusterFieldOf(name, fmt.Sprintf(".status.conditions[?(@.type==%q)].status", conditionType))
 }
+
+// kubectlDryRun sends a manifest through the API server and its admission
+// webhooks without storing it, and returns everything kubectl printed, so that
+// the warnings a webhook attaches to an accepted request are visible too.
+func kubectlDryRun(manifest string) (string, error) {
+	cmd := exec.Command("kubectl", "apply", "--dry-run=server", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}

@@ -293,6 +293,257 @@ spec:
                     - sourceCluster
                     type: object
                 type: object
+              compliance:
+                description: |-
+                  compliance applies a named preset of audit, logging and network
+                  settings and reports, in status, whether each of its controls holds in
+                  the running database. It configures and verifies; it does not make a
+                  cluster compliant with anything. Leave it unset for none. It can be set
+                  or changed on a running cluster, which replaces the pods one at a time.
+                properties:
+                  auditLogs:
+                    default: {}
+                    description: |-
+                      auditLogs says where audit logs are delivered and how long they are
+                      expected to be kept.
+                    properties:
+                      destination:
+                        description: |-
+                          destination is the S3 or S3-compatible bucket audit logs are uploaded
+                          to. It is required when spec.compliance is set. It must not share a
+                          path with the cluster's backups.
+                        properties:
+                          bucket:
+                            description: bucket is the name of an existing bucket.
+                            maxLength: 63
+                            minLength: 3
+                            pattern: ^[a-z0-9][a-z0-9.-]*[a-z0-9]$
+                            type: string
+                          credentialsSecret:
+                            description: |-
+                              credentialsSecret names a Secret in the cluster's namespace with the
+                              keys AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                          endpoint:
+                            description: |-
+                              endpoint is the URL of an S3-compatible store such as MinIO or Ceph.
+                              Leave it unset for Amazon S3.
+                            maxLength: 512
+                            pattern: ^https?://[^\s/]+(/\S*)?$
+                            type: string
+                          forcePathStyle:
+                            description: |-
+                              forcePathStyle addresses the bucket as host/bucket instead of
+                              bucket.host, which most S3-compatible stores need.
+                            type: boolean
+                          path:
+                            description: |-
+                              path is where in the bucket this cluster's backups live, without
+                              leading or trailing slashes. It defaults to <namespace>/<cluster name>.
+                              Two clusters must not share a path.
+                            maxLength: 512
+                            pattern: ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$
+                            type: string
+                            x-kubernetes-validations:
+                            - message: path must not contain . or .. segments
+                              rule: '!self.split(''/'').exists(s, s == ''.'' || s
+                                == ''..'')'
+                          region:
+                            description: region is the bucket's region. Leave it unset
+                              for stores that have none.
+                            maxLength: 64
+                            type: string
+                          type:
+                            default: s3
+                            description: |-
+                              type is the kind of store. Only "s3" is supported; it covers Amazon S3
+                              and any store that speaks its API.
+                            enum:
+                            - s3
+                            type: string
+                        required:
+                        - bucket
+                        - credentialsSecret
+                        type: object
+                      logParameters:
+                        default: false
+                        description: |-
+                          logParameters makes pgaudit record the values bound to a statement's
+                          parameters. They are written in clear text, so any sensitive value a
+                          client sends ends up in the audit log. Leave it off unless the log's
+                          destination is protected to the same level as the database.
+                        type: boolean
+                      retentionDays:
+                        description: |-
+                          retentionDays is how long audit logs are expected to be kept. The
+                          operator does not enforce it: retention is a property of the bucket's
+                          own lifecycle rules, and the operator checks that they cover this many
+                          days. Leave it unset to use the standard's default.
+                        format: int32
+                        maximum: 7300
+                        minimum: 1
+                        type: integer
+                    type: object
+                  network:
+                    description: |-
+                      network adjusts the NetworkPolicy the operator creates for the
+                      database pods.
+                    properties:
+                      allowFrom:
+                        description: |-
+                          allowFrom lists additional peers that may connect to PostgreSQL. Pods
+                          labelled db.youroperator.io/client=true in the cluster's own namespace
+                          are always allowed.
+                        items:
+                          description: |-
+                            NetworkPolicyPeer describes a peer to allow traffic to/from. Only certain combinations of
+                            fields are allowed
+                          properties:
+                            ipBlock:
+                              description: |-
+                                ipBlock defines policy on a particular IPBlock. If this field is set then
+                                neither of the other fields can be.
+                              properties:
+                                cidr:
+                                  description: |-
+                                    cidr is a string representing the IPBlock
+                                    Valid examples are "192.168.1.0/24" or "2001:db8::/64"
+                                  type: string
+                                except:
+                                  description: |-
+                                    except is a slice of CIDRs that should not be included within an IPBlock
+                                    Valid examples are "192.168.1.0/24" or "2001:db8::/64"
+                                    Except values will be rejected if they are outside the cidr range
+                                  items:
+                                    type: string
+                                  type: array
+                                  x-kubernetes-list-type: atomic
+                              required:
+                              - cidr
+                              type: object
+                            namespaceSelector:
+                              description: |-
+                                namespaceSelector selects namespaces using cluster-scoped labels. This field follows
+                                standard label selector semantics; if present but empty, it selects all namespaces.
+
+                                If podSelector is also set, then the NetworkPolicyPeer as a whole selects
+                                the pods matching podSelector in the namespaces selected by namespaceSelector.
+                                Otherwise it selects all pods in the namespaces selected by namespaceSelector.
+                              properties:
+                                matchExpressions:
+                                  description: matchExpressions is a list of label
+                                    selector requirements. The requirements are ANDed.
+                                  items:
+                                    description: |-
+                                      A label selector requirement is a selector that contains values, a key, and an operator that
+                                      relates the key and values.
+                                    properties:
+                                      key:
+                                        description: key is the label key that the
+                                          selector applies to.
+                                        type: string
+                                      operator:
+                                        description: |-
+                                          operator represents a key's relationship to a set of values.
+                                          Valid operators are In, NotIn, Exists and DoesNotExist.
+                                        type: string
+                                      values:
+                                        description: |-
+                                          values is an array of string values. If the operator is In or NotIn,
+                                          the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                          the values array must be empty. This array is replaced during a strategic
+                                          merge patch.
+                                        items:
+                                          type: string
+                                        type: array
+                                        x-kubernetes-list-type: atomic
+                                    required:
+                                    - key
+                                    - operator
+                                    type: object
+                                  type: array
+                                  x-kubernetes-list-type: atomic
+                                matchLabels:
+                                  additionalProperties:
+                                    type: string
+                                  description: |-
+                                    matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                    map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                    operator is "In", and the values array contains only "value". The requirements are ANDed.
+                                  type: object
+                              type: object
+                              x-kubernetes-map-type: atomic
+                            podSelector:
+                              description: |-
+                                podSelector is a label selector which selects pods. This field follows standard label
+                                selector semantics; if present but empty, it selects all pods.
+
+                                If namespaceSelector is also set, then the NetworkPolicyPeer as a whole selects
+                                the pods matching podSelector in the Namespaces selected by NamespaceSelector.
+                                Otherwise it selects the pods matching podSelector in the policy's own namespace.
+                              properties:
+                                matchExpressions:
+                                  description: matchExpressions is a list of label
+                                    selector requirements. The requirements are ANDed.
+                                  items:
+                                    description: |-
+                                      A label selector requirement is a selector that contains values, a key, and an operator that
+                                      relates the key and values.
+                                    properties:
+                                      key:
+                                        description: key is the label key that the
+                                          selector applies to.
+                                        type: string
+                                      operator:
+                                        description: |-
+                                          operator represents a key's relationship to a set of values.
+                                          Valid operators are In, NotIn, Exists and DoesNotExist.
+                                        type: string
+                                      values:
+                                        description: |-
+                                          values is an array of string values. If the operator is In or NotIn,
+                                          the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                          the values array must be empty. This array is replaced during a strategic
+                                          merge patch.
+                                        items:
+                                          type: string
+                                        type: array
+                                        x-kubernetes-list-type: atomic
+                                    required:
+                                    - key
+                                    - operator
+                                    type: object
+                                  type: array
+                                  x-kubernetes-list-type: atomic
+                                matchLabels:
+                                  additionalProperties:
+                                    type: string
+                                  description: |-
+                                    matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                    map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                    operator is "In", and the values array contains only "value". The requirements are ANDed.
+                                  type: object
+                              type: object
+                              x-kubernetes-map-type: atomic
+                          type: object
+                        maxItems: 20
+                        type: array
+                    type: object
+                  standard:
+                    description: |-
+                      standard is the preset to apply: "hipaa", "soc2" or "pci". Each sets
+                      which statement classes pgaudit logs and the default audit log
+                      retention, and decides which controls are checked.
+                    enum:
+                    - hipaa
+                    - soc2
+                    - pci
+                    type: string
+                required:
+                - standard
+                type: object
               ha:
                 default: {}
                 description: |-
@@ -533,6 +784,60 @@ spec:
                         type: string
                     type: object
                 type: object
+              compliance:
+                description: |-
+                  compliance reports which controls of the selected standard hold in the
+                  running cluster, as last observed.
+                properties:
+                  controls:
+                    description: controls is the result for each control the preset
+                      checks.
+                    items:
+                      description: ComplianceControl is one control and whether it
+                        held when last checked.
+                      properties:
+                        evidence:
+                          description: evidence is what was observed, in words.
+                          maxLength: 1024
+                          type: string
+                        id:
+                          description: id names the control, for example "audit-logging".
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                        observedAt:
+                          description: observedAt is when the evidence was read.
+                          format: date-time
+                          type: string
+                        status:
+                          description: |-
+                            status is Met when the evidence shows the control holds, NotMet when it
+                            shows it does not, and Unknown when it could not be checked. Unknown
+                            never counts as Met.
+                          enum:
+                          - Met
+                          - NotMet
+                          - Unknown
+                          type: string
+                      required:
+                      - id
+                      - status
+                      type: object
+                    maxItems: 32
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - id
+                    x-kubernetes-list-type: map
+                  lastChecked:
+                    description: lastChecked is when the controls were last read from
+                      the cluster.
+                    format: date-time
+                    type: string
+                  standard:
+                    description: standard is the preset the controls below were checked
+                      against.
+                    type: string
+                type: object
               conditions:
                 description: |-
                   conditions represent the current state of the PostgresCluster resource.
@@ -546,6 +851,7 @@ spec:
                   - "WALArchivingHealthy": WAL archiving keeps up with the primary's writes
                   - "ReplicationHealthy": exactly one primary, and every replica is streaming within the lag limit
                   - "FailoverInProgress": there is currently no primary, so a leader election is under way
+                  - "ControlsMet": every control of the selected compliance standard is Met
 
                   The status of each condition is one of True, False, or Unknown.
                 items:
