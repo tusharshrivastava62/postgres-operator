@@ -83,7 +83,16 @@ spec:
       - name: curl
         image: curlimages/curl:8.10.1
         command: [/bin/sh, -c]
-        args: ["curl -sf --aws-sigv4 aws:amz:us-east-1:s3 --user %[3]s:%[4]s -X PUT http://s3:8333/%[5]s"]
+        # Retried here, every two seconds, rather than by the kubelet: its
+        # backoff between restarts grows to minutes, and a store that takes a
+        # little longer than usual to start would outlast the test's wait.
+        args:
+        - |
+          for i in $(seq 1 120); do
+            curl -sf --aws-sigv4 aws:amz:us-east-1:s3 --user %[3]s:%[4]s -X PUT http://s3:8333/%[5]s && exit 0
+            sleep 2
+          done
+          exit 1
 `, objectStoreNamespace, objectStoreImage, objectStoreAccessKey, objectStoreSecretKey, backupBucket)
 }
 
