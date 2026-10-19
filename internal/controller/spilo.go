@@ -171,7 +171,7 @@ func desiredStatefulSet(cluster *dbv1alpha1.PostgresCluster, image string) (*app
 	selector := podSelectorLabels(cluster)
 	replicas := cluster.Spec.Instances
 
-	return &appsv1.StatefulSet{
+	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cluster.Name,
 			Namespace: cluster.Namespace,
@@ -269,5 +269,13 @@ func desiredStatefulSet(cluster *dbv1alpha1.PostgresCluster, image string) (*app
 				},
 			}},
 		},
-	}, nil
+	}
+	// The audit shipper rides in the database pod, because the log it ships is
+	// on the pod's own volume.
+	if auditShipperEnabled(cluster) {
+		pod := &sts.Spec.Template.Spec
+		pod.Containers = append(pod.Containers, auditShipperContainer(cluster, image))
+		pod.Volumes = append(pod.Volumes, auditShipperVolume(cluster))
+	}
+	return sts, nil
 }

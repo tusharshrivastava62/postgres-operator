@@ -146,6 +146,15 @@ func (r *PostgresClusterReconciler) backupSecretProblem(ctx context.Context, clu
 			}
 		}
 	}
+	if compliance := cluster.Spec.Compliance; compliance != nil {
+		dest := compliance.AuditLogs.Destination
+		if dest == nil {
+			return "spec.compliance.auditLogs.destination is required: audit logs need somewhere to go", nil
+		}
+		if problem, err := r.credentialsProblem(ctx, cluster.Namespace, auditSecretPurpose, dest.CredentialsSecret); problem != "" || err != nil {
+			return problem, err
+		}
+	}
 	return "", nil
 }
 

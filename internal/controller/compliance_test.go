@@ -18,6 +18,7 @@ import (
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -234,6 +235,15 @@ var _ = Describe("Compliance settings through the reconciler", func() {
 		ExpectWithOffset(1, err).NotTo(HaveOccurred())
 	}
 	create := func(name string) {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: auditSecret, Namespace: namespace},
+			StringData: map[string]string{secretKeyAccessKey: "id", secretKeySecretKey: testSecretValue},
+		}
+		if err := k8sClient.Create(ctx, secret); err == nil {
+			DeferCleanup(func() { ExpectWithOffset(1, client.IgnoreNotFound(k8sClient.Delete(ctx, secret))).To(Succeed()) })
+		} else {
+			ExpectWithOffset(1, apierrors.IsAlreadyExists(err)).To(BeTrue())
+		}
 		c := &dbv1alpha1.PostgresCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 			Spec: dbv1alpha1.PostgresClusterSpec{

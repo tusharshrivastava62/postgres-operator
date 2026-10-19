@@ -168,6 +168,11 @@ func (r *PostgresClusterReconciler) reconcilePodDisruptionBudget(ctx context.Con
 // object only for Create, and on Update touch just the fields Kubernetes
 // allows to change after creation (replicas, pod template, update strategy, labels).
 func (r *PostgresClusterReconciler) reconcileStatefulSet(ctx context.Context, cluster *dbv1alpha1.PostgresCluster, image string) error {
+	// The audit shipper's script comes first: a pod that mounts it cannot start
+	// without it.
+	if err := r.reconcileAuditScripts(ctx, cluster); err != nil {
+		return fmt.Errorf("reconciling the audit shipper script: %w", err)
+	}
 	desired, err := desiredStatefulSet(cluster, image)
 	if err != nil {
 		return err

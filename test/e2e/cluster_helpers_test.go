@@ -14,13 +14,19 @@ package e2e
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
+
+	. "github.com/onsi/gomega"
 )
+
+// postgresContainer is the database container of a cluster pod.
+const postgresContainer = "postgres"
 
 // kubectlOut runs kubectl and returns its standard output only. The shared
 // utils.Run merges standard error into the result, and kubectl writes
@@ -64,7 +70,7 @@ func conditionStatus(conditionType string) (string, error) {
 // runInPod runs a bash script in the postgres container of a pod. The script
 // receives args as $1, $2, ... so values never need quoting into it.
 func runInPod(pod, script string, args ...string) (string, error) {
-	cmd := append([]string{"exec", pod, "-c", "postgres", "--", "bash", "-c", script, "bash"}, args...)
+	cmd := append([]string{"exec", pod, "-c", postgresContainer, "--", "bash", "-c", script, "bash"}, args...)
 	return inCluster(cmd...)
 }
 
@@ -176,4 +182,77 @@ func kubectlDryRun(manifest string) (string, error) {
 	cmd.Stdin = strings.NewReader(manifest)
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
+}
+
+// shippedAuditLog is what verifyShippedAuditLog found in the audit bucket.
+type shippedAuditLog struct {
+	Series     int             `json:"series"`
+	Chunks     int             `json:"chunks"`
+	Bytes      int             `json:"bytes"`
+	Contiguous bool            `json:"contiguous"`
+	Matches    bool            `json:"matches"`
+	Markers    map[string]bool `json:"markers"`
+}
+
+// auditVerifyScript reads one pod's audit log back out of the bucket, from
+// inside the pod's shipper container, which already holds the destination and
+// its credentials. It checks that each series is made of contiguous byte
+// ranges starting at zero, that the ranges joined are the start of the log file
+// on the volume, and which of the given markers the shipped text contains.
+const auditVerifyScript = `
+import boto3, gzip, json, os, re, sys
+from botocore.config import Config
+
+style = "path" if os.environ["AUDIT_FORCE_PATH_STYLE"] == "true" else "auto"
+client = boto3.client("s3", endpoint_url=os.environ["AUDIT_ENDPOINT"] or None,
+                      region_name=os.environ["AUDIT_REGION"] or "us-east-1",
+                      config=Config(s3={"addressing_style": style}))
+prefix = "%s/%s/" % (os.environ["AUDIT_PREFIX"].strip("/"), os.environ["POD_NAME"])
+keys, token = [], None
+while True:
+    args = {"Bucket": os.environ["AUDIT_BUCKET"], "Prefix": prefix}
+    if token:
+        args["ContinuationToken"] = token
+    page = client.list_objects_v2(**args)
+    keys += [item["Key"] for item in page.get("Contents", [])]
+    if not page.get("IsTruncated"):
+        break
+    token = page["NextContinuationToken"]
+
+series = {}
+for key in keys:
+    match = re.match(r"(.*/)(\d{12})-(\d{12})\.csv\.gz$", key)
+    if match:
+        series.setdefault(match.group(1), []).append((int(match.group(2)), int(match.group(3)), key))
+
+result = {"series": len(series), "chunks": len(keys), "bytes": 0, "contiguous": True, "matches": True}
+text = b""
+for name, chunks in series.items():
+    chunks.sort()
+    covered = 0
+    joined = b""
+    for start, end, key in chunks:
+        if start != covered:
+            result["contiguous"] = False
+        covered = end
+        joined += gzip.decompress(client.get_object(Bucket=os.environ["AUDIT_BUCKET"], Key=key)["Body"].read())
+    logfile = os.path.join(os.environ["LOG_DIR"], name.rstrip("/").split("/")[-2])
+    if not open(logfile, "rb").read().startswith(joined):
+        result["matches"] = False
+    result["bytes"] += len(joined)
+    text += joined
+result["markers"] = {marker: marker.encode() in text for marker in sys.argv[1:]}
+print(json.dumps(result))
+`
+
+// verifyShippedAuditLog runs auditVerifyScript against a pod's shipper.
+func verifyShippedAuditLog(pod string, markers ...string) shippedAuditLog {
+	args := append([]string{"exec", pod, "-c", "audit-shipper", "--", "python3", "-c", auditVerifyScript}, markers...)
+	out, err := inCluster(args...)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), out)
+	// The result is the script's last line; anything before it is not JSON.
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	var result shippedAuditLog
+	ExpectWithOffset(1, json.Unmarshal([]byte(lines[len(lines)-1]), &result)).To(Succeed(), out)
+	return result
 }

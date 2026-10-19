@@ -914,6 +914,41 @@ print(append_extensions('bg_mon,pg_stat_statements,pgextwlist,pg_auth_mon,set_us
 			g.Expect(log).NotTo(ContainSubstring("bound-parameter-value"))
 		}, time.Minute, pollEvery).Should(Succeed())
 
+		By("running a shipper beside every database container, which cannot unready the pod")
+		for _, pod := range pods() {
+			names, err := inCluster("get", "pod", pod, "-o", "jsonpath={.spec.containers[*].name}")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(strings.Fields(names)).To(Equal([]string{postgresContainer, "audit-shipper"}), pod)
+		}
+
+		By("shipping the audit log to the bucket, byte for byte, from the primary and from a replica")
+		replica := ""
+		for _, pod := range pods() {
+			if pod != primary {
+				replica = pod
+				break
+			}
+		}
+		for _, pod := range []string{primary, replica} {
+			// The shipper has been running since the pod started; run it once
+			// more now, so the statements above are certainly in the bucket.
+			_, err = inCluster("exec", pod, "-c", "audit-shipper", "--", "python3", "/scripts/audit_shipper.py")
+			Expect(err).NotTo(HaveOccurred(), pod)
+			verified := verifyShippedAuditLog(pod, "AUDIT: SESSION")
+			Expect(verified.Series).To(BeNumerically(">=", 1), pod)
+			Expect(verified.Bytes).To(BeNumerically(">", 0), pod)
+			Expect(verified.Contiguous).To(BeTrue(), "%s: the chunks of a series are contiguous byte ranges", pod)
+			Expect(verified.Matches).To(BeTrue(), "%s: the chunks, joined, are the start of the log file", pod)
+			Expect(verified.Markers).To(HaveKeyWithValue("AUDIT: SESSION", true), pod)
+		}
+		probed := verifyShippedAuditLog(primary, probeTable,
+			"DDL,CREATE TABLE,", "WRITE,INSERT,", "READ,SELECT,", "ROLE,CREATE ROLE,")
+		Expect(probed.Markers).To(HaveLen(5))
+		for marker, found := range probed.Markers {
+			Expect(found).To(BeTrue(), "the audit trail in the bucket has %q", marker)
+		}
+		Expect(probed.Series).To(BeNumerically(">=", 1))
+
 		By("swapping one standard for another by reloading, without replacing a pod")
 		during := podUIDs()
 		patchCompliance(`{"spec":{"compliance":{"standard":"soc2"}}}`)
@@ -934,7 +969,13 @@ print(append_extensions('bg_mon,pg_stat_statements,pgextwlist,pg_auth_mon,set_us
 		Expect(err).NotTo(HaveOccurred())
 		for _, pod := range pods() {
 			Expect(show(pod, "shared_preload_libraries")).To(Equal(defaultList), pod)
+			names, err := inCluster("get", "pod", pod, "-o", "jsonpath={.spec.containers[*].name}")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(strings.Fields(names)).To(Equal([]string{postgresContainer}), "%s: the shipper goes with the settings", pod)
 		}
+		scripts, err := inCluster("get", "configmap", "-o", "name")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(scripts).NotTo(ContainSubstring(clusterName+"-audit-scripts"), "nor does its script stay behind")
 		Eventually(func(g Gomega) {
 			config, err := runInPod(primary, `curl -s localhost:8008/config`)
 			g.Expect(err).NotTo(HaveOccurred())
