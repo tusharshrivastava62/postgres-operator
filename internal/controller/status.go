@@ -328,6 +328,11 @@ func (r *PostgresClusterReconciler) reconcileStatus(ctx context.Context, cluster
 		changed = meta.SetStatusCondition(&cluster.Status.Conditions, c) || changed
 	}
 	changed = applyBackupStatus(cluster, backupEval) || changed
+	complianceChanged, err := r.reconcileComplianceStatus(ctx, cluster, pods.Items)
+	if err != nil {
+		return clusterView{}, err
+	}
+	changed = complianceChanged || changed
 	if cluster.Status.PrimaryInstance != obs.primary {
 		cluster.Status.PrimaryInstance = obs.primary
 		changed = true
@@ -425,6 +430,7 @@ func (r *PostgresClusterReconciler) forgetMetrics(key client.ObjectKey) {
 	walArchiveLagBytes.DeletePartialMatch(match)
 	restoreVerificationLastSuccess.DeletePartialMatch(match)
 	restoreVerificationDuration.DeletePartialMatch(match)
+	complianceControls.DeletePartialMatch(match)
 	r.lastPrimary.Delete(key.Namespace + "/" + key.Name)
 }
 

@@ -137,9 +137,9 @@ var _ = Describe("The backup environment", func() {
 
 	It("reads the encryption key from its Secret and says it is hexadecimal", func() {
 		c := backupCluster()
-		c.Spec.Backup.Encryption = &dbv1alpha1.BackupEncryption{KeySecret: "backup-key"}
+		c.Spec.Backup.Encryption = &dbv1alpha1.BackupEncryption{KeySecret: backupKeySecret}
 		env := envMap(backupEnv(c))
-		Expect(env["WALG_LIBSODIUM_KEY"].ValueFrom.SecretKeyRef.Name).To(Equal("backup-key"))
+		Expect(env["WALG_LIBSODIUM_KEY"].ValueFrom.SecretKeyRef.Name).To(Equal(backupKeySecret))
 		Expect(env["WALG_LIBSODIUM_KEY"].ValueFrom.SecretKeyRef.Key).To(Equal(secretKeyEncKey))
 		Expect(env["WALG_LIBSODIUM_KEY_TRANSFORM"].Value).To(Equal("hex"))
 	})

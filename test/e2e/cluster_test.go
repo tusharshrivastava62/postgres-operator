@@ -980,6 +980,92 @@ print(append_extensions('bg_mon,pg_stat_statements,pgextwlist,pg_auth_mon,set_us
 		Expect(canConnect("e2e-other", "probe-other-sql", image, client, service, 5432)).To(BeFalse(),
 			"the client label counts only in the cluster's own namespace")
 
+		By("running a restore test: the one an earlier scenario ran was cleaned up with its job, and the schedule is weekly")
+		_, err = inCluster("create", "job", "restore-for-compliance", "--from=cronjob/"+clusterName+"-restore-verify")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _, _ = inCluster("delete", "job", "restore-for-compliance", "--wait=false") })
+		Eventually(func() (string, error) {
+			return inCluster("get", "job", "restore-for-compliance", "-o", "jsonpath={.status.succeeded}")
+		}, 8*time.Minute, pollEvery).Should(Equal("1"))
+
+		By("reading the controls back from the running cluster: all of them met")
+		runComplianceJobs("one")
+		var state complianceState
+		Eventually(func(g Gomega) {
+			state, err = readCompliance()
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(state.LastChecked).NotTo(BeEmpty(), "the jobs have reported")
+			g.Expect(state.ControlCount).To(Equal(10))
+			for id, c := range state.Controls {
+				g.Expect(c.Status).To(Equal("Met"), "%s: %s", id, c.Evidence)
+			}
+			g.Expect(state.MetStatus).To(Equal("True"), state.MetMessage)
+		}, 3*time.Minute, pollEvery).Should(Succeed())
+		Expect(state.Controls["network-isolation"].Evidence).To(ContainSubstring("was refused"),
+			"the probe, a stranger to the policy, really was turned away")
+		Expect(state.Controls["audit-log-delivery"].Evidence).To(ContainSubstring("3 pod(s) each shipped"))
+		Expect(state.Controls["audit-log-retention"].Evidence).To(ContainSubstring("not protected from deletion"),
+			"the store has no object lock, and says so")
+
+		By("noticing a role whose password is not stored as scram")
+		_, err = psql(primary, "", "set password_encryption = 'md5'; create role e2e_weak login password 'x'")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _, _ = psql(primary, "", "drop role if exists e2e_weak") })
+		runComplianceJobs("weak")
+		Eventually(func(g Gomega) {
+			state, err = readCompliance()
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(state.Controls["authentication"].Status).To(Equal("NotMet"))
+		}, 3*time.Minute, pollEvery).Should(Succeed())
+		Expect(state.Controls["authentication"].Evidence).To(
+			ContainSubstring("1 role(s) have a password that is not stored as scram-sha-256"))
+		Expect(state.MetStatus).To(Equal("False"))
+		Expect(state.MetMessage).To(ContainSubstring("authentication"))
+		Expect(state.Controls["audit-logging"].Status).To(Equal("Met"), "and only what is wrong is reported")
+
+		By("seeing it fixed")
+		_, err = psql(primary, "", "drop role e2e_weak")
+		Expect(err).NotTo(HaveOccurred())
+		runComplianceJobs("fixed")
+		Eventually(func(g Gomega) {
+			state, err = readCompliance()
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(state.Controls["authentication"].Status).To(Equal("Met"))
+			g.Expect(state.MetStatus).To(Equal("True"), state.MetMessage)
+		}, 3*time.Minute, pollEvery).Should(Succeed())
+
+		By("noticing a lifecycle rule that would expire the audit logs too soon")
+		const putRule = `
+import boto3, os
+from botocore.config import Config
+c = boto3.client("s3", endpoint_url=os.environ["AUDIT_ENDPOINT"] or None, region_name="us-east-1",
+                 config=Config(s3={"addressing_style": "path"}))
+c.put_bucket_lifecycle_configuration(Bucket=os.environ["AUDIT_BUCKET"], LifecycleConfiguration={"Rules": [
+    {"ID": "tidy-up", "Status": "Enabled", "Filter": {"Prefix": "audit/"}, "Expiration": {"Days": 30}}]})
+`
+		const removeRule = `
+import boto3, os
+from botocore.config import Config
+c = boto3.client("s3", endpoint_url=os.environ["AUDIT_ENDPOINT"] or None, region_name="us-east-1",
+                 config=Config(s3={"addressing_style": "path"}))
+c.delete_bucket_lifecycle(Bucket=os.environ["AUDIT_BUCKET"])
+`
+		onShipper := func(script string) error {
+			_, err := inCluster("exec", primary, "-c", "audit-shipper", "--", "python3", "-c", script)
+			return err
+		}
+		Expect(onShipper(putRule)).To(Succeed())
+		DeferCleanup(func() { _ = onShipper(removeRule) })
+		runComplianceJobs("early")
+		Eventually(func(g Gomega) {
+			state, err = readCompliance()
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(state.Controls["audit-log-retention"].Status).To(Equal("NotMet"))
+		}, 3*time.Minute, pollEvery).Should(Succeed())
+		Expect(state.Controls["audit-log-retention"].Evidence).To(
+			And(ContainSubstring(`"tidy-up"`), ContainSubstring("30 days")))
+		Expect(onShipper(removeRule)).To(Succeed())
+
 		By("swapping one standard for another by reloading, without replacing a pod")
 		during := podUIDs()
 		patchCompliance(`{"spec":{"compliance":{"standard":"soc2"}}}`)
@@ -1010,7 +1096,15 @@ print(append_extensions('bg_mon,pg_stat_statements,pgextwlist,pg_auth_mon,set_us
 			"and an ordinary pod can reach PostgreSQL again")
 		scripts, err := inCluster("get", "configmap", "-o", "name")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(scripts).NotTo(ContainSubstring(clusterName+"-audit-scripts"), "nor does its script stay behind")
+		Expect(scripts).NotTo(ContainSubstring(clusterName+"-compliance-scripts"), "nor do the scripts stay behind")
+		cronjobs, err := inCluster("get", "cronjob", "-o", "name")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cronjobs).NotTo(ContainSubstring("-compliance-check"), "the compliance jobs go with the settings")
+		Expect(cronjobs).NotTo(ContainSubstring("-network-probe"))
+		state, err = readCompliance()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(state.ControlCount).To(BeZero(), "what the standard reported is cleared")
+		Expect(state.MetStatus).To(BeEmpty(), "and so is the condition")
 		Eventually(func(g Gomega) {
 			config, err := runInPod(primary, `curl -s localhost:8008/config`)
 			g.Expect(err).NotTo(HaveOccurred())

@@ -59,8 +59,10 @@ while true; do
 done`
 )
 
-func auditScriptsName(cluster *dbv1alpha1.PostgresCluster) string {
-	return cluster.Name + "-audit-scripts"
+// complianceScriptsName is the ConfigMap with the scripts of the compliance pods:
+// the audit shipper, the compliance check and the network probe.
+func complianceScriptsName(cluster *dbv1alpha1.PostgresCluster) string {
+	return cluster.Name + "-compliance-scripts"
 }
 
 // auditShipperEnabled reports whether the database pods get the shipper: the
@@ -118,22 +120,22 @@ func auditShipperVolume(cluster *dbv1alpha1.PostgresCluster) corev1.Volume {
 	return corev1.Volume{
 		Name: scriptVolumeName,
 		VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-			LocalObjectReference: corev1.LocalObjectReference{Name: auditScriptsName(cluster)},
+			LocalObjectReference: corev1.LocalObjectReference{Name: complianceScriptsName(cluster)},
 		}},
 	}
 }
 
-// reconcileAuditScripts keeps the ConfigMap holding the shipper's script while
+// reconcileAuditScripts keeps the ConfigMap holding the compliance pods' scripts while
 // the cluster has compliance settings, and removes it when they go. It runs
 // before the StatefulSet, because a pod cannot start without the volume.
 func (r *PostgresClusterReconciler) reconcileAuditScripts(ctx context.Context, cluster *dbv1alpha1.PostgresCluster) error {
-	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: auditScriptsName(cluster), Namespace: cluster.Namespace}}
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: complianceScriptsName(cluster), Namespace: cluster.Namespace}}
 	if !auditShipperEnabled(cluster) {
 		return client.IgnoreNotFound(r.Delete(ctx, cm))
 	}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
 		cm.Labels = labelsForCluster(cluster)
-		cm.Data = map[string]string{auditScriptFile: auditShipperScript}
+		cm.Data = complianceScripts()
 		return controllerutil.SetControllerReference(cluster, cm, r.Scheme)
 	})
 	return err

@@ -221,6 +221,7 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		{"reconciling statefulset", func() error { return r.reconcileStatefulSet(ctx, cluster, image) }},
 		{"removing the old backup job", func() error { return r.removeLegacyBackupCronJob(ctx, cluster) }},
 		{"reconciling the backup jobs", func() error { return r.reconcileBackupJobs(ctx, cluster, image) }},
+		{"reconciling the compliance jobs", func() error { return r.reconcileComplianceJobs(ctx, cluster, image) }},
 	}
 	for _, step := range steps {
 		if err := step.run(); err != nil {

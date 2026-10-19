@@ -53,7 +53,7 @@ var _ = Describe("The audit shipper sidecar", func() {
 	hipaa := func() *dbv1alpha1.PostgresCluster {
 		c := withCompliance(plainCluster(), dbv1alpha1.StandardHIPAA)
 		c.Namespace = sourceNamespace
-		c.Name = "orders"
+		c.Name = sourceName
 		c.Spec.Compliance.AuditLogs.Destination.Endpoint = "http://minio:9000"
 		c.Spec.Compliance.AuditLogs.Destination.ForcePathStyle = true
 		return c
@@ -153,7 +153,7 @@ var _ = Describe("The audit shipper sidecar", func() {
 				}
 			}
 			Expect(script).NotTo(BeNil())
-			Expect(script.ConfigMap.Name).To(Equal("orders-audit-scripts"))
+			Expect(script.ConfigMap.Name).To(Equal("orders-compliance-scripts"))
 		})
 
 		It("is absent without compliance settings, and nothing about the pod changes", func() {
@@ -173,7 +173,7 @@ var _ = Describe("The audit shipper sidecar", func() {
 
 		It("leaves the database container exactly as it was, bar the library list", func() {
 			with := build(hipaa()).Containers[0]
-			without := build(plainWithName("orders", sourceNamespace)).Containers[0]
+			without := build(plainWithName(sourceName, sourceNamespace)).Containers[0]
 			Expect(with.VolumeMounts).To(Equal(without.VolumeMounts))
 			Expect(with.Resources).To(Equal(without.Resources))
 			Expect(with.SecurityContext).To(Equal(without.SecurityContext))
@@ -241,7 +241,7 @@ var _ = Describe("The audit shipper through the reconciler", func() {
 		res := reconcileOnce(name)
 		Expect(res.RequeueAfter).To(Equal(backupSecretRecheckDelay))
 		noStatefulSet(name)
-		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, key(name+"-audit-scripts"), &corev1.ConfigMap{}))).To(BeTrue())
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, key(name+"-compliance-scripts"), &corev1.ConfigMap{}))).To(BeTrue())
 		cond := progressing(name)
 		Expect(cond.Reason).To(Equal("BackupSecretProblem"))
 		Expect(cond.Message).To(ContainSubstring("audit log credentials Secret"))
@@ -278,7 +278,7 @@ var _ = Describe("The audit shipper through the reconciler", func() {
 		Expect(sts.Spec.Template.Spec.Containers[1].Name).To(Equal(auditContainerName))
 
 		cm := &corev1.ConfigMap{}
-		Expect(k8sClient.Get(ctx, key(name+"-audit-scripts"), cm)).To(Succeed())
+		Expect(k8sClient.Get(ctx, key(name+"-compliance-scripts"), cm)).To(Succeed())
 		Expect(cm.Data).To(HaveKeyWithValue(auditScriptFile, auditShipperScript))
 		Expect(cm.OwnerReferences).NotTo(BeEmpty(), "it goes with the cluster")
 	})
@@ -288,7 +288,7 @@ var _ = Describe("The audit shipper through the reconciler", func() {
 		createSecret(name+"-audit", good)
 		newCluster(name, name+"-audit")
 		reconcileOnce(name)
-		Expect(k8sClient.Get(ctx, key(name+"-audit-scripts"), &corev1.ConfigMap{})).To(Succeed())
+		Expect(k8sClient.Get(ctx, key(name+"-compliance-scripts"), &corev1.ConfigMap{})).To(Succeed())
 		Expect(k8sClient.Get(ctx, key(name), &appsv1.StatefulSet{})).To(Succeed())
 	})
 
@@ -297,7 +297,7 @@ var _ = Describe("The audit shipper through the reconciler", func() {
 		createSecret(name+"-audit", good)
 		newCluster(name, name+"-audit")
 		reconcileOnce(name)
-		Expect(k8sClient.Get(ctx, key(name+"-audit-scripts"), &corev1.ConfigMap{})).To(Succeed())
+		Expect(k8sClient.Get(ctx, key(name+"-compliance-scripts"), &corev1.ConfigMap{})).To(Succeed())
 
 		c := &dbv1alpha1.PostgresCluster{}
 		Expect(k8sClient.Get(ctx, key(name), c)).To(Succeed())
@@ -305,7 +305,7 @@ var _ = Describe("The audit shipper through the reconciler", func() {
 		Expect(k8sClient.Update(ctx, c)).To(Succeed())
 		reconcileOnce(name)
 
-		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, key(name+"-audit-scripts"), &corev1.ConfigMap{}))).To(BeTrue())
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, key(name+"-compliance-scripts"), &corev1.ConfigMap{}))).To(BeTrue())
 		sts := &appsv1.StatefulSet{}
 		Expect(k8sClient.Get(ctx, key(name), sts)).To(Succeed())
 		Expect(sts.Spec.Template.Spec.Containers).To(HaveLen(1))
@@ -317,17 +317,17 @@ var _ = Describe("The audit shipper through the reconciler", func() {
 		newCluster(name, name+"-audit")
 		reconcileOnce(name)
 		cm := &corev1.ConfigMap{}
-		Expect(k8sClient.Get(ctx, key(name+"-audit-scripts"), cm)).To(Succeed())
+		Expect(k8sClient.Get(ctx, key(name+"-compliance-scripts"), cm)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, cm)).To(Succeed())
 		reconcileOnce(name)
-		Expect(k8sClient.Get(ctx, key(name+"-audit-scripts"), &corev1.ConfigMap{})).To(Succeed())
+		Expect(k8sClient.Get(ctx, key(name+"-compliance-scripts"), &corev1.ConfigMap{})).To(Succeed())
 	})
 
 	It("does not create a script for a cluster without compliance settings", func() {
 		const name = "ship-never"
 		newCluster(name, "x", func(c *dbv1alpha1.PostgresCluster) { c.Spec.Compliance = nil })
 		reconcileOnce(name)
-		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, key(name+"-audit-scripts"), &corev1.ConfigMap{}))).To(BeTrue())
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, key(name+"-compliance-scripts"), &corev1.ConfigMap{}))).To(BeTrue())
 	})
 })
 

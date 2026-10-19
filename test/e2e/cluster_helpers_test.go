@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
@@ -328,4 +329,75 @@ func canConnect(namespace, name, image string, podLabels map[string]string, host
 		g.Expect(err).NotTo(HaveOccurred())
 	}, 3*time.Minute, pollEvery).Should(Succeed())
 	return strings.TrimSpace(answer) == "OPEN"
+}
+
+// controlResult is one compliance control as the cluster reports it.
+type controlResult struct {
+	Status   string
+	Evidence string
+}
+
+// complianceState is the compliance part of a cluster's status.
+type complianceState struct {
+	Controls     map[string]controlResult
+	LastChecked  string
+	MetStatus    string // the ControlsMet condition's status, empty when there is none
+	MetMessage   string
+	ControlCount int
+}
+
+// readCompliance reads status.compliance and the ControlsMet condition.
+func readCompliance() (complianceState, error) {
+	out, err := inCluster("get", "postgrescluster", clusterName, "-o", "json")
+	if err != nil {
+		return complianceState{}, err
+	}
+	var cluster struct {
+		Status struct {
+			Compliance struct {
+				LastChecked string `json:"lastChecked"`
+				Controls    []struct {
+					ID       string `json:"id"`
+					Status   string `json:"status"`
+					Evidence string `json:"evidence"`
+				} `json:"controls"`
+			} `json:"compliance"`
+			Conditions []struct {
+				Type    string `json:"type"`
+				Status  string `json:"status"`
+				Message string `json:"message"`
+			} `json:"conditions"`
+		} `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(out), &cluster); err != nil {
+		return complianceState{}, err
+	}
+	state := complianceState{Controls: map[string]controlResult{}, LastChecked: cluster.Status.Compliance.LastChecked}
+	for _, c := range cluster.Status.Compliance.Controls {
+		state.Controls[c.ID] = controlResult{Status: c.Status, Evidence: c.Evidence}
+	}
+	state.ControlCount = len(cluster.Status.Compliance.Controls)
+	for _, c := range cluster.Status.Conditions {
+		if c.Type == "ControlsMet" {
+			state.MetStatus, state.MetMessage = c.Status, c.Message
+		}
+	}
+	return state, nil
+}
+
+// runComplianceJobs runs the compliance check and the network probe now,
+// instead of waiting for their schedule, and waits for both to finish.
+func runComplianceJobs(suffix string) {
+	jobs := []string{"check-" + suffix, "probe-" + suffix}
+	for i, cronjob := range []string{clusterName + "-compliance-check", clusterName + "-network-probe"} {
+		_, err := inCluster("create", "job", jobs[i], "--from=cronjob/"+cronjob)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred())
+		job := jobs[i]
+		DeferCleanup(func() { _, _ = inCluster("delete", "job", job, "--wait=false") })
+	}
+	for _, job := range jobs {
+		EventuallyWithOffset(1, func() (string, error) {
+			return inCluster("get", "job", job, "-o", "jsonpath={.status.succeeded}")
+		}, 5*time.Minute, pollEvery).Should(Equal("1"), job)
+	}
 }

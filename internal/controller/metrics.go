@@ -20,6 +20,7 @@ const (
 	labelName      = "name"
 	labelResult    = "result"
 	labelInstance  = "instance"
+	labelStatus    = "status"
 )
 
 // Custom, per-cluster metrics. These are registered on the same registry
@@ -90,6 +91,11 @@ var (
 		Help: "How long the last passing restore test took: the measured time to recover.",
 	}, []string{labelNamespace, labelName})
 
+	complianceControls = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "postgrescluster_compliance_controls",
+		Help: "Number of compliance controls of a PostgresCluster in each status (Met, NotMet, Unknown), as of the last compliance check.",
+	}, []string{labelNamespace, labelName, labelStatus})
+
 	replicationLagBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "postgrescluster_replication_lag_bytes",
 		Help: "Bytes of WAL each streaming replica is behind the primary. A replica that is not streaming has no series.",
@@ -110,5 +116,6 @@ func init() {
 		walArchiveLagBytes,
 		restoreVerificationLastSuccess,
 		restoreVerificationDuration,
+		complianceControls,
 	)
 }

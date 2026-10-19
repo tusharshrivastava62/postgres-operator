@@ -13,6 +13,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -27,15 +28,23 @@ import (
 // record, so it is what has to be watched and read.
 type patroniEndpoints = corev1.Endpoints //nolint:staticcheck // see above
 
+// watchedComponents are the components whose pods wake the reconciler: the
+// database itself, and every job that reports to it through its termination
+// message.
+func watchedComponents() []string {
+	return []string{
+		componentPostgres, componentBackupStatus, componentRestoreVerify, componentRestoreCheck,
+		componentComplianceCheck, componentNetworkProbe,
+	}
+}
+
 // clusterForObject maps a database pod, or the Endpoints Patroni keeps for a
 // cluster, back to the PostgresCluster it belongs to. Objects without the
 // database labels, such as backup Job pods, map to nothing.
 func clusterForObject(_ context.Context, obj client.Object) []reconcile.Request {
 	labels := obj.GetLabels()
 	component := labels[labelAppComponent]
-	if labels[labelAppName] != appNameValue || labels[labelAppInstance] == "" ||
-		(component != componentPostgres && component != componentBackupStatus && component != componentRestoreVerify &&
-			component != componentRestoreCheck) {
+	if labels[labelAppName] != appNameValue || labels[labelAppInstance] == "" || !slices.Contains(watchedComponents(), component) {
 		return nil
 	}
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{

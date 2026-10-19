@@ -295,7 +295,7 @@ var _ = Describe("Reading the backup report", func() {
 var _ = Describe("The backup status CronJob", func() {
 	cluster := func() *dbv1alpha1.PostgresCluster {
 		c := backupCluster()
-		c.Spec.Backup.Encryption = &dbv1alpha1.BackupEncryption{KeySecret: "backup-key"}
+		c.Spec.Backup.Encryption = &dbv1alpha1.BackupEncryption{KeySecret: backupKeySecret}
 		return c
 	}
 
