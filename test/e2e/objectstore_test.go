@@ -84,12 +84,18 @@ spec:
         image: curlimages/curl:8.10.1
         command: [/bin/sh, -c]
         # Retried here, every two seconds, rather than by the kubelet: its
-        # backoff between restarts grows to minutes, and a store that takes a
-        # little longer than usual to start would outlast the test's wait.
+        # backoff between restarts grows to minutes. A bucket that already exists
+        # answers 409, which counts as done: the first attempt can create the
+        # bucket and still look like a failure (the store is slow to answer, and
+        # curl gives up), and with curl -f every retry after that would fail for
+        # ever on the bucket it had just made.
         args:
         - |
           for i in $(seq 1 120); do
-            curl -sf --aws-sigv4 aws:amz:us-east-1:s3 --user %[3]s:%[4]s -X PUT http://s3:8333/%[5]s && exit 0
+            code=$(curl -s -o /dev/null -w '%%{http_code}' --max-time 10 \
+              --aws-sigv4 aws:amz:us-east-1:s3 --user %[3]s:%[4]s \
+              -X PUT http://s3:8333/%[5]s)
+            case "$code" in 200|409) exit 0 ;; esac
             sleep 2
           done
           exit 1
