@@ -949,6 +949,37 @@ print(append_extensions('bg_mon,pg_stat_statements,pgextwlist,pg_auth_mon,set_us
 		}
 		Expect(probed.Series).To(BeNumerically(">=", 1))
 
+		By("isolating the database pods: the operator, replication and the cluster's own jobs still work")
+		policy, err := inCluster("get", "networkpolicy", clusterName, "-o", "jsonpath={range .spec.ingress[*]}x{end}")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(policy).To(Equal("xxxx"), "clients, the cluster's own pods, its jobs, and the operator")
+		Expect(conditionStatus("ReplicationHealthy")).To(Equal("True"), "replication runs through the policy")
+		// The audit settings above reached the primary through Patroni's REST
+		// API from the operator, and the writer is a client that declared itself.
+		_, err = inCluster("create", "job", "status-under-policy", "--from=cronjob/"+clusterName+"-backup-status")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _, _ = inCluster("delete", "job", "status-under-policy", "--wait=false") })
+		Eventually(func() (string, error) {
+			return inCluster("get", "job", "status-under-policy", "-o", "jsonpath={.status.succeeded}")
+		}, 5*time.Minute, pollEvery).Should(Equal("1"), "the cluster's own job reaches the database through the policy")
+
+		primaryIP, err := inCluster("get", "pod", primary, "-o", "jsonpath={.status.podIP}")
+		Expect(err).NotTo(HaveOccurred())
+		service := clusterName + "." + clusterNamespace + ".svc.cluster.local"
+		client := map[string]string{clientLabel: clientLabelValue}
+		_, err = kubectlOut("create", "namespace", "e2e-other")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _, _ = kubectlOut("delete", "namespace", "e2e-other", "--wait=false") })
+		Expect(canConnect(clusterNamespace, "probe-client-sql", image, client, service, 5432)).To(BeTrue(),
+			"a pod that declares itself a client reaches PostgreSQL")
+		Expect(canConnect(clusterNamespace, "probe-client-patroni", image, client, primaryIP, 8008)).To(BeFalse(),
+			"but not Patroni's REST API")
+		Expect(canConnect(clusterNamespace, "probe-stranger-sql", image, nil, service, 5432)).To(BeFalse(),
+			"a pod that does not is refused")
+		Expect(canConnect(clusterNamespace, "probe-stranger-patroni", image, nil, primaryIP, 8008)).To(BeFalse())
+		Expect(canConnect("e2e-other", "probe-other-sql", image, client, service, 5432)).To(BeFalse(),
+			"the client label counts only in the cluster's own namespace")
+
 		By("swapping one standard for another by reloading, without replacing a pod")
 		during := podUIDs()
 		patchCompliance(`{"spec":{"compliance":{"standard":"soc2"}}}`)
@@ -973,6 +1004,10 @@ print(append_extensions('bg_mon,pg_stat_statements,pgextwlist,pg_auth_mon,set_us
 			Expect(err).NotTo(HaveOccurred())
 			Expect(strings.Fields(names)).To(Equal([]string{postgresContainer}), "%s: the shipper goes with the settings", pod)
 		}
+		_, err = inCluster("get", "networkpolicy", clusterName)
+		Expect(err).To(HaveOccurred(), "the policy goes with the settings")
+		Expect(canConnect(clusterNamespace, "probe-after-sql", image, nil, service, 5432)).To(BeTrue(),
+			"and an ordinary pod can reach PostgreSQL again")
 		scripts, err := inCluster("get", "configmap", "-o", "name")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(scripts).NotTo(ContainSubstring(clusterName+"-audit-scripts"), "nor does its script stay behind")

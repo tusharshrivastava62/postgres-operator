@@ -183,7 +183,7 @@ var _ = Describe("PostgresCluster CRD compliance fields", func() {
 			out := make([]networkingv1.NetworkPolicyPeer, n)
 			for i := range out {
 				out[i] = networkingv1.NetworkPolicyPeer{PodSelector: &metav1.LabelSelector{
-					MatchLabels: map[string]string{"app": fmt.Sprintf("client-%d", i)},
+					MatchLabels: map[string]string{labelApp: fmt.Sprintf("client-%d", i)},
 				}}
 			}
 			return out

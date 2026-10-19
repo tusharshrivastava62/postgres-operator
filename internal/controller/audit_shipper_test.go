@@ -52,7 +52,7 @@ func envByName(env []corev1.EnvVar) map[string]corev1.EnvVar {
 var _ = Describe("The audit shipper sidecar", func() {
 	hipaa := func() *dbv1alpha1.PostgresCluster {
 		c := withCompliance(plainCluster(), dbv1alpha1.StandardHIPAA)
-		c.Namespace = "prod"
+		c.Namespace = sourceNamespace
 		c.Name = "orders"
 		c.Spec.Compliance.AuditLogs.Destination.Endpoint = "http://minio:9000"
 		c.Spec.Compliance.AuditLogs.Destination.ForcePathStyle = true
@@ -173,7 +173,7 @@ var _ = Describe("The audit shipper sidecar", func() {
 
 		It("leaves the database container exactly as it was, bar the library list", func() {
 			with := build(hipaa()).Containers[0]
-			without := build(plainWithName("orders", "prod")).Containers[0]
+			without := build(plainWithName("orders", sourceNamespace)).Containers[0]
 			Expect(with.VolumeMounts).To(Equal(without.VolumeMounts))
 			Expect(with.Resources).To(Equal(without.Resources))
 			Expect(with.SecurityContext).To(Equal(without.SecurityContext))
@@ -199,7 +199,7 @@ var _ = Describe("The audit shipper through the reconciler", func() {
 	ctx := context.Background()
 	key := func(name string) types.NamespacedName { return types.NamespacedName{Name: name, Namespace: namespace} }
 	reconcileOnce := func(name string) reconcile.Result {
-		rec := &PostgresClusterReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Patroni: &fakePatroni{live: map[string]any{}}}
+		rec := &PostgresClusterReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Patroni: &fakePatroni{live: map[string]any{}}, Operator: testOperator}
 		res, err := rec.Reconcile(ctx, reconcile.Request{NamespacedName: key(name)})
 		ExpectWithOffset(1, err).NotTo(HaveOccurred())
 		return res

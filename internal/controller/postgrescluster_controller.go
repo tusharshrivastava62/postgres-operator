@@ -21,6 +21,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -55,6 +56,11 @@ type PostgresClusterReconciler struct {
 	// uses a plain HTTP client; tests substitute a fake.
 	Patroni PatroniAPI
 
+	// Operator says where the operator itself runs, which a cluster's network
+	// policy needs to let it reach Patroni. Left nil, a cluster that wants a
+	// network policy is reported, not built.
+	Operator *OperatorIdentity
+
 	// lastPrimary remembers, per cluster, the last primary this process
 	// observed, so a change of primary can be counted. It is kept in memory
 	// because the status field is cleared in the gap between two primaries,
@@ -72,6 +78,7 @@ type PostgresClusterReconciler struct {
 // +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
 //
 // The next three are Patroni's own permissions (see patroniRules). The
@@ -146,6 +153,15 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{RequeueAfter: backupSecretRecheckDelay}, r.markInvalidSpec(ctx, cluster, "BackupSecretProblem", problem)
 	}
 
+	// A network policy has to name the operator, or it would cut the operator
+	// off from Patroni. Without knowing which pods it is, build nothing.
+	if networkPolicyWanted(cluster) && r.Operator == nil {
+		const message = "the operator could not tell which pods it runs as, which the network policy needs to let it through: " +
+			"set POD_NAMESPACE and POD_NAME from the downward API on its pod"
+		log.Info("not reconciling: " + message)
+		return ctrl.Result{}, r.markInvalidSpec(ctx, cluster, reasonOperatorIdentity, message)
+	}
+
 	// A cluster that has never been reconciled has no status.image yet. Start
 	// it from a clean slate: anything Patroni left from a deleted cluster of
 	// the same name must go before the first pod starts, and that cannot be
@@ -189,28 +205,27 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{RequeueAfter: wait}, nil
 	}
 
-	if err := r.reconcileSecret(ctx, cluster); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling secret: %w", err)
+	// In this order: the pods cannot hold or renew the leader lock without
+	// Patroni's access objects (see reconcilePatroniAccess), and they must never
+	// be reachable by more than their network policy allows, nor start without
+	// the script they mount (see reconcileStatefulSet).
+	steps := []struct {
+		failure string
+		run     func() error
+	}{
+		{"reconciling secret", func() error { return r.reconcileSecret(ctx, cluster) }},
+		{"reconciling patroni access", func() error { return r.reconcilePatroniAccess(ctx, cluster) }},
+		{"reconciling services", func() error { return r.reconcileServices(ctx, cluster) }},
+		{"reconciling pod disruption budget", func() error { return r.reconcilePodDisruptionBudget(ctx, cluster) }},
+		{"reconciling network policy", func() error { return r.reconcileNetworkPolicy(ctx, cluster) }},
+		{"reconciling statefulset", func() error { return r.reconcileStatefulSet(ctx, cluster, image) }},
+		{"removing the old backup job", func() error { return r.removeLegacyBackupCronJob(ctx, cluster) }},
+		{"reconciling the backup jobs", func() error { return r.reconcileBackupJobs(ctx, cluster, image) }},
 	}
-	// Before the StatefulSet: the pods cannot hold or renew the leader lock
-	// without these, see reconcilePatroniAccess.
-	if err := r.reconcilePatroniAccess(ctx, cluster); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling patroni access: %w", err)
-	}
-	if err := r.reconcileServices(ctx, cluster); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling services: %w", err)
-	}
-	if err := r.reconcilePodDisruptionBudget(ctx, cluster); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling pod disruption budget: %w", err)
-	}
-	if err := r.reconcileStatefulSet(ctx, cluster, image); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling statefulset: %w", err)
-	}
-	if err := r.removeLegacyBackupCronJob(ctx, cluster); err != nil {
-		return ctrl.Result{}, fmt.Errorf("removing the old backup job: %w", err)
-	}
-	if err := r.reconcileBackupJobs(ctx, cluster, image); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconciling the backup jobs: %w", err)
+	for _, step := range steps {
+		if err := step.run(); err != nil {
+			return ctrl.Result{}, fmt.Errorf("%s: %w", step.failure, err)
+		}
 	}
 	// Runs last and only on the happy path: status should reflect what the
 	// steps above actually converged to, not guess at partial progress from
@@ -423,6 +438,7 @@ func (r *PostgresClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&rbacv1.Role{}).
 		Owns(&rbacv1.RoleBinding{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
+		Owns(&networkingv1.NetworkPolicy{}).
 		// Neither of these is owned by the PostgresCluster: pods belong to the
 		// StatefulSet and Patroni owns the Endpoints, so they are mapped back
 		// to their cluster by label. Both are filtered to the changes that

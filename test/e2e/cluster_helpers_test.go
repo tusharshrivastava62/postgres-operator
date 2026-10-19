@@ -25,6 +25,13 @@ import (
 	. "github.com/onsi/gomega"
 )
 
+// clientLabel marks a pod as an application that may connect to a cluster with
+// compliance settings.
+const (
+	clientLabel      = "db.youroperator.io/client"
+	clientLabelValue = "true"
+)
+
 // postgresContainer is the database container of a cluster pod.
 const postgresContainer = "postgres"
 
@@ -94,6 +101,8 @@ kind: Pod
 metadata:
   name: writer
   namespace: %s
+  # A client says so: a cluster with compliance settings admits only pods that do.
+  labels: {db.youroperator.io/client: "true"}
 spec:
   restartPolicy: Never
   securityContext:
@@ -255,4 +264,68 @@ func verifyShippedAuditLog(pod string, markers ...string) shippedAuditLog {
 	var result shippedAuditLog
 	ExpectWithOffset(1, json.Unmarshal([]byte(lines[len(lines)-1]), &result)).To(Succeed(), out)
 	return result
+}
+
+// connectionProbe is a pod that tries once to open a TCP connection, and says
+// whether it could. It is built to be admitted by the strictest Pod Security
+// level, so it can run beside the database.
+func connectionProbe(namespace, name, image string, podLabels map[string]string, host string, port int) string {
+	labels := "{}"
+	if len(podLabels) > 0 {
+		pairs := make([]string, 0, len(podLabels))
+		for k, v := range podLabels {
+			pairs = append(pairs, fmt.Sprintf("%q: %q", k, v))
+		}
+		labels = "{" + strings.Join(pairs, ", ") + "}"
+	}
+	return fmt.Sprintf(`apiVersion: v1
+kind: Pod
+metadata:
+  name: %[2]s
+  namespace: %[1]s
+  labels: %[4]s
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 101
+    runAsGroup: 103
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+  - name: probe
+    image: %[3]s
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities: {drop: [ALL]}
+    command:
+    - python3
+    - -c
+    - |
+      import socket, sys
+      s = socket.socket()
+      s.settimeout(5)
+      try:
+          s.connect((sys.argv[1], int(sys.argv[2])))
+          print("OPEN")
+      except Exception:
+          print("CLOSED")
+    - %[5]s
+    - "%[6]d"
+`, namespace, name, image, labels, host, port)
+}
+
+// canConnect runs a connectionProbe and reports whether the connection opened.
+func canConnect(namespace, name, image string, podLabels map[string]string, host string, port int) bool {
+	_, err := kubectlIn(connectionProbe(namespace, name, image, podLabels, host, port), "apply", "-f", "-")
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	defer func() { _, _ = kubectlOut("-n", namespace, "delete", "pod", name, "--wait=false") }()
+	var answer string
+	EventuallyWithOffset(1, func(g Gomega) {
+		phase, err := kubectlOut("-n", namespace, "get", "pod", name, "-o", "jsonpath={.status.phase}")
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(phase).To(Equal("Succeeded"))
+		answer, err = kubectlOut("-n", namespace, "logs", name)
+		g.Expect(err).NotTo(HaveOccurred())
+	}, 3*time.Minute, pollEvery).Should(Succeed())
+	return strings.TrimSpace(answer) == "OPEN"
 }

@@ -33,6 +33,10 @@ import (
 const (
 	componentRestoreCheck = "restore-check"
 
+	// componentComplianceCheck labels the pods of the compliance check job. It is
+	// named here so the network policy already lets those pods through.
+	componentComplianceCheck = "compliance-check"
+
 	// scriptInterpreter and scriptsDir are how the jobs run the scripts mounted from
 	// the scripts ConfigMap.
 	scriptInterpreter = "python3"

@@ -12,7 +12,9 @@ package v1alpha1
 
 import (
 	"fmt"
+	"net"
 
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
@@ -30,9 +32,11 @@ func validateCompliance(cluster *dbv1alpha1.PostgresCluster) field.ErrorList {
 	destPath := field.NewPath("spec", "compliance", "auditLogs", "destination")
 	dest := compliance.AuditLogs.Destination
 
+	errs = append(errs, validatePeers(field.NewPath("spec", "compliance", "network", "allowFrom"), compliance.Network.AllowFrom)...)
+
 	if dest == nil {
-		return field.ErrorList{field.Required(destPath,
-			"must be set when spec.compliance is set: audit logs need somewhere to go")}
+		return append(errs, field.Required(destPath,
+			"must be set when spec.compliance is set: audit logs need somewhere to go"))
 	}
 	errs = append(errs, validateRegion(destPath, dest)...)
 
@@ -49,6 +53,55 @@ func validateCompliance(cluster *dbv1alpha1.PostgresCluster) field.ErrorList {
 		}
 	}
 	return errs
+}
+
+// validatePeers checks the extra peers the network policy lets in. The API
+// server refuses a NetworkPolicy with an empty peer, or one that mixes an IP
+// block with selectors, and the operator would then fail to create the policy
+// on every reconcile; refusing it here says so at once, at the field.
+func validatePeers(path *field.Path, peers []networkingv1.NetworkPolicyPeer) field.ErrorList {
+	var errs field.ErrorList
+	for i, peer := range peers {
+		at := path.Index(i)
+		selectors := peer.PodSelector != nil || peer.NamespaceSelector != nil
+		switch {
+		case peer.IPBlock == nil && !selectors:
+			errs = append(errs, field.Required(at,
+				"must set podSelector, namespaceSelector or ipBlock: an empty peer names nobody"))
+		case peer.IPBlock != nil && selectors:
+			errs = append(errs, field.Invalid(at.Child("ipBlock"), peer.IPBlock.CIDR,
+				"cannot be combined with podSelector or namespaceSelector in the same peer"))
+		case peer.IPBlock != nil:
+			if _, network, err := net.ParseCIDR(peer.IPBlock.CIDR); err != nil {
+				errs = append(errs, field.Invalid(at.Child("ipBlock", "cidr"), peer.IPBlock.CIDR, "must be a CIDR, such as 10.0.0.0/16"))
+			} else {
+				errs = append(errs, validateExceptions(at.Child("ipBlock", "except"), network, peer.IPBlock.Except)...)
+			}
+		}
+	}
+	return errs
+}
+
+// validateExceptions requires every excepted range to lie inside the block it
+// is cut out of, as the API server does.
+func validateExceptions(path *field.Path, block *net.IPNet, except []string) field.ErrorList {
+	var errs field.ErrorList
+	for i, cidr := range except {
+		ip, network, err := net.ParseCIDR(cidr)
+		switch {
+		case err != nil:
+			errs = append(errs, field.Invalid(path.Index(i), cidr, "must be a CIDR, such as 10.0.1.0/24"))
+		case !block.Contains(ip) || !blockContainsNetwork(block, network):
+			errs = append(errs, field.Invalid(path.Index(i), cidr, "must lie inside the block it is excepted from"))
+		}
+	}
+	return errs
+}
+
+func blockContainsNetwork(block, inner *net.IPNet) bool {
+	blockOnes, _ := block.Mask.Size()
+	innerOnes, _ := inner.Mask.Size()
+	return block.Contains(inner.IP) && innerOnes >= blockOnes
 }
 
 // complianceWarnings returns advice about compliance settings that are

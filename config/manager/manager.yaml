@@ -65,6 +65,17 @@ spec:
           - --health-probe-bind-address=:8081
         image: controller:latest
         name: manager
+        # Which pods the operator is, for the network policies of the clusters it
+        # manages.
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         ports:
         - containerPort: 8081
           name: health

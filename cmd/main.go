@@ -11,6 +11,7 @@ work becomes available under the Change License (Apache-2.0).
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
@@ -173,9 +174,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	// A cluster's network policy has to let the operator through to Patroni, so
+	// the operator reads which pods it runs as: its own pod, named by the
+	// downward API. Without it a cluster that wants a policy is reported, not
+	// built; everything else is unaffected.
+	operator, err := controller.DiscoverOperatorIdentity(context.Background(), mgr.GetAPIReader(),
+		os.Getenv("POD_NAMESPACE"), os.Getenv("POD_NAME"))
+	if err != nil {
+		setupLog.Info("Could not tell which pods the operator runs as; clusters with a network policy will not be reconciled",
+			"reason", err.Error())
+		operator = nil
+	}
+
 	if err := (&controller.PostgresClusterReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Operator: operator,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "postgrescluster")
 		os.Exit(1)

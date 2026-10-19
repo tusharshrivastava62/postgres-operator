@@ -228,7 +228,7 @@ var _ = Describe("Compliance settings through the reconciler", func() {
 			dcsMaximumLagOnFailover: float64(1048576), dcsFailsafeMode: true, dcsSynchronousMode: false,
 			dcsPostgresql: map[string]any{dcsParameters: map[string]any{paramLogStatement: spiloLogStatement}},
 		}}
-		rec = &PostgresClusterReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Patroni: fake}
+		rec = &PostgresClusterReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Patroni: fake, Operator: testOperator}
 	})
 	reconcileOnce := func(name string) {
 		_, err := rec.Reconcile(ctx, reconcile.Request{NamespacedName: key(name)})

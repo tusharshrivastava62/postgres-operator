@@ -14,7 +14,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	dbv1alpha1 "github.com/tusharshrivastava62/postgres-operator/api/v1alpha1"
 )
@@ -22,6 +24,8 @@ import (
 const (
 	auditDestinationField = "spec.compliance.auditLogs.destination"
 	ordersBackupPath      = "prod/orders"
+	ordersName            = "orders"
+	privateBlock          = "10.0.0.0/16"
 	minioEndpoint         = "http://minio:9000"
 )
 
@@ -54,7 +58,7 @@ var _ = Describe("PostgresCluster compliance validation", func() {
 				},
 			},
 		}
-		obj.Name, obj.Namespace = "orders", "prod"
+		obj.Name, obj.Namespace = ordersName, "prod"
 		validator = PostgresClusterCustomValidator{}
 	})
 
@@ -106,6 +110,79 @@ var _ = Describe("PostgresCluster compliance validation", func() {
 			obj.Spec.Backup.Destination.Region = ""
 			_, err := validator.ValidateCreate(ctx, obj)
 			Expect(err).NotTo(HaveOccurred())
+		})
+	})
+
+	Context("the extra network peers", func() {
+		peer := func(mutate func(*networkingv1.NetworkPolicyPeer)) []networkingv1.NetworkPolicyPeer {
+			p := networkingv1.NetworkPolicyPeer{}
+			mutate(&p)
+			return []networkingv1.NetworkPolicyPeer{p}
+		}
+		podPeer := func(p *networkingv1.NetworkPolicyPeer) {
+			p.PodSelector = &metav1.LabelSelector{MatchLabels: map[string]string{"app": "api"}}
+		}
+
+		It("admits a pod selector, a namespace selector, and both together", func() {
+			obj.Spec.Compliance.Network.AllowFrom = append(peer(podPeer),
+				peer(func(p *networkingv1.NetworkPolicyPeer) { p.NamespaceSelector = &metav1.LabelSelector{} })...)
+			obj.Spec.Compliance.Network.AllowFrom = append(obj.Spec.Compliance.Network.AllowFrom, peer(func(p *networkingv1.NetworkPolicyPeer) {
+				podPeer(p)
+				p.NamespaceSelector = &metav1.LabelSelector{MatchLabels: map[string]string{"team": "orders"}}
+			})...)
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("admits an IP block with an exception inside it", func() {
+			obj.Spec.Compliance.Network.AllowFrom = peer(func(p *networkingv1.NetworkPolicyPeer) {
+				p.IPBlock = &networkingv1.IPBlock{CIDR: privateBlock, Except: []string{"10.0.1.0/24"}}
+			})
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("rejects an empty peer, which names nobody and which the API server would refuse later", func() {
+			obj.Spec.Compliance.Network.AllowFrom = peer(func(*networkingv1.NetworkPolicyPeer) {})
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.compliance.network.allowFrom[0]"))
+			Expect(err.Error()).To(ContainSubstring("names nobody"))
+		})
+
+		It("rejects an IP block mixed with a selector", func() {
+			obj.Spec.Compliance.Network.AllowFrom = peer(func(p *networkingv1.NetworkPolicyPeer) {
+				podPeer(p)
+				p.IPBlock = &networkingv1.IPBlock{CIDR: privateBlock}
+			})
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("allowFrom[0].ipBlock"))
+		})
+
+		DescribeTable("rejects a block that is not a CIDR, or an exception that is not inside it",
+			func(cidr string, except []string, field string) {
+				obj.Spec.Compliance.Network.AllowFrom = peer(func(p *networkingv1.NetworkPolicyPeer) {
+					p.IPBlock = &networkingv1.IPBlock{CIDR: cidr, Except: except}
+				})
+				_, err := validator.ValidateCreate(ctx, obj)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring(field))
+			},
+			Entry("no mask", "10.0.0.1", nil, "allowFrom[0].ipBlock.cidr"),
+			Entry("not an address", "internal", nil, "allowFrom[0].ipBlock.cidr"),
+			Entry("an exception outside the block", privateBlock, []string{"192.168.0.0/24"}, "ipBlock.except[0]"),
+			Entry("an exception wider than the block", "10.0.1.0/24", []string{privateBlock}, "ipBlock.except[0]"),
+			Entry("an exception that is not a CIDR", privateBlock, []string{"10.0.1.1"}, "ipBlock.except[0]"),
+		)
+
+		It("is checked even when the destination is missing, so every problem is reported at once", func() {
+			obj.Spec.Compliance.AuditLogs.Destination = nil
+			obj.Spec.Compliance.Network.AllowFrom = peer(func(*networkingv1.NetworkPolicyPeer) {})
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring(auditDestinationField))
+			Expect(err.Error()).To(ContainSubstring("allowFrom[0]"))
 		})
 	})
 
