@@ -1,0 +1,66 @@
+# A cluster with a compliance preset: audit logging with pgaudit, the audit log
+# shipped to a bucket, a network policy around the database pods, and a check
+# every ten minutes of whether each control holds (see docs/compliance.md).
+#
+# This configures and verifies. It does not make a cluster compliant with
+# anything: read "What a preset does not do" in docs/compliance.md.
+#
+# Before you apply it:
+#
+#   1. Create the audit log bucket, and a Secret for it. Keep it apart from the
+#      backups' bucket path.
+#
+#        kubectl create secret generic audit-s3 \
+#          --from-literal=AWS_ACCESS_KEY_ID=... --from-literal=AWS_SECRET_ACCESS_KEY=...
+#
+#   2. Label every application pod that connects to the database, in this
+#      namespace. The network policy admits nothing else, so an application
+#      without the label loses its connection the moment the policy is created:
+#
+#        db.youroperator.io/client: "true"
+#
+#   3. Create the backup Secrets (see the backup sample), since a compliance
+#      cluster is expected to have encrypted, restore-tested backups.
+#
+# Turning a preset on for a running cluster replaces its pods one at a time.
+apiVersion: db.youroperator.io/v1alpha1
+kind: PostgresCluster
+metadata:
+  labels:
+    app.kubernetes.io/name: postgres-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: postgrescluster-compliance-sample
+spec:
+  instances: 3
+  version: "17"
+  storage:
+    size: 10Gi
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      memory: "1Gi"
+  backup:
+    enabled: true
+    schedule: "0 2 * * *"
+    destination:
+      bucket: my-database-backups
+      region: eu-west-1
+      credentialsSecret: backup-s3
+    encryption:
+      keySecret: backup-key
+    verification:
+      enabled: true
+      schedule: "0 4 * * 0"
+  compliance:
+    standard: hipaa          # hipaa, soc2 or pci: which statements are audited, and the default retention
+    auditLogs:
+      destination:
+        bucket: my-audit-logs
+        region: eu-west-1
+        credentialsSecret: audit-s3
+      retentionDays: 2190    # how long the logs are expected to be kept; checked, not enforced
+      logParameters: false   # leave off: it writes bound parameter values in clear text
+    network:
+      allowFrom: []          # more peers that may connect, besides pods labelled as clients

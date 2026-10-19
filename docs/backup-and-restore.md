@@ -3,6 +3,9 @@
 How backups work, how to restore, and what to watch. The fields are documented in the CRD
 (`kubectl explain postgrescluster.spec.backup`); this page covers how to use them.
 
+Backups, their encryption and restore testing are also one of the controls checked for a cluster
+with compliance settings (`backup-recovery`); see [compliance.md](compliance.md).
+
 ## What is backed up
 
 With `backup.enabled`, three things run:

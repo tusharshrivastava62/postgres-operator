@@ -70,12 +70,20 @@ Apply that, and the operator's reconcile loop takes it from there.
   records how long that took in `.status.backup.verification.durationSeconds`: the measured
   time to recover. The `RestoreVerified` condition and a failed test in `Degraded` say whether
   it passed.
+- **Applies a compliance preset and checks it.** `spec.compliance` (`hipaa`, `soc2` or `pci`)
+  turns on `pgaudit` audit logging, ships the PostgreSQL log to a bucket from a sidecar,
+  puts a `NetworkPolicy` around the database pods, and then, every ten minutes, reads the running
+  database and the bucket and reports whether each of ten controls holds, with the evidence, in
+  `.status.compliance`. **This configures and verifies. It does not make a cluster compliant with
+  anything**: see [What a compliance preset is not](#what-a-compliance-preset-is-not) and
+  [`docs/compliance.md`](docs/compliance.md).
 - **Reports real status.** `.status.primaryInstance` names the pod holding the leader lock,
   taken from Patroni's own record rather than a pod label that can go stale on a hung primary,
   and `.status.replicationLagBytes` gives each streaming replica's lag. `.status.conditions`
   says what that means: `Available` (a Ready primary exists), `ReplicationHealthy` (every
   replica is streaming within `maximumLagOnFailover`), `FailoverInProgress` (there was a
-  primary and now there is not), `Progressing`, and `Degraded` (a backup, WAL archiving or restore test is unhealthy).
+  primary and now there is not), `Progressing`, `Degraded` (a backup, WAL archiving or restore test is unhealthy),
+  and, with compliance settings, `ControlsMet` (every compliance control passed its last check).
   `kubectl get postgrescluster` shows version, instances, primary and availability. With
   backups on, `.status.backup` shows the newest backup, how many exist, the earliest time a
   restore can reach, and how far WAL archiving is behind, and the `BackupHealthy` and
@@ -94,11 +102,25 @@ Apply that, and the operator's reconcile loop takes it from there.
   `_backup_last_success_timestamp_seconds`, `_has_primary`, `_primary_changes_total` and
   `_replication_lag_bytes` (per replica), `_backup_count`, `_backup_last_size_bytes` and
   `_wal_archive_lag_bytes`, `_restore_verification_last_success_timestamp_seconds` and
-  `_restore_verification_duration_seconds`. A deleted cluster's series are dropped.
+  `_restore_verification_duration_seconds`, and `_compliance_controls` (by status: Met, NotMet,
+  Unknown). A deleted cluster's series are dropped.
 - **Cleans up automatically.** Nearly every resource the operator creates is owner-referenced
   to the `PostgresCluster`, so deleting the custom resource deletes it; the exceptions are the
   data and backup volumes and the credentials `Secret` (see below). The `Endpoints` and
   `ConfigMap`s Patroni writes are removed too, so a new cluster with the same name starts clean.
+
+## What a compliance preset is not
+
+Enabling `spec.compliance` does **not** make a cluster compliant with HIPAA, SOC 2, PCI DSS or any
+other standard. Compliance belongs to an organisation's whole practice, judged by qualified
+people. A preset configures some technical controls and checks that they hold; the preset names
+label configuration profiles and are not claims. The mapping from these controls to any
+regulation has not been reviewed by anyone qualified, which is why none is cited anywhere. A
+`ControlsMet` of `True` means only that every check this operator makes passed the last time it
+ran. It says nothing about people and process, about encryption at rest, about whether the audit
+log can be altered, about whether the audit is enough for your obligations, or about anything
+else the operator does not check. [`docs/compliance.md`](docs/compliance.md) lists what is
+checked and, at length, what is not.
 
 ## What it's *not*: a data-loss shortcut
 
@@ -123,8 +145,9 @@ Apply that, and the operator's reconcile loop takes it from there.
   The bundled wal-g binary has known critical findings in its Go dependencies, tolerated in
   [`images/spilo/.trivyignore`](images/spilo/.trivyignore) until upstream updates it.
 - **Patroni's REST API is unauthenticated** inside the cluster, and pods can reach each
-  other's. The operator uses it to apply `spec.ha`. Restrict it with a `NetworkPolicy` that
-  allows the operator and the cluster's own pods to reach port 8008.
+  other's. The operator uses it to apply `spec.ha`. A cluster with `spec.compliance` gets a
+  `NetworkPolicy` that admits only the operator and the cluster's own pods to port 8008; for any
+  other cluster, create one yourself.
 - **Pod-level changes replace pods one at a time, and the primary goes last.** A new image or
   new resource limits are rolled out by the operator, not by the `StatefulSet`: replicas first,
   each only once replication is healthy again, then a Patroni switchover to an updated replica
@@ -137,6 +160,14 @@ Apply that, and the operator's reconcile loop takes it from there.
 - **Backups and restores are S3 only, and a restore always makes a new cluster.** There is no
   in-place restore. Restoring, encrypting, alerting and sizing are covered in
   [`docs/backup-and-restore.md`](docs/backup-and-restore.md).
+- **Compliance settings isolate the database the moment they are applied.** The `NetworkPolicy`
+  admits only pods labelled `db.youroperator.io/client: "true"` in the cluster's namespace (and
+  peers you list), so an application without the label loses its connection. Applying or
+  removing the settings replaces the database pods one at a time. The policy restricts ingress
+  only, depends on your network plugin enforcing `NetworkPolicy` (a probe reports whether it
+  does), and the server's TLS certificate is generated by the image, not issued by a certificate
+  authority. The controls are checked every ten minutes, not continuously. A custom `spec.image`
+  must contain `pgaudit` and the extensions the default image preloads.
 - **A restore test needs scratch space as large as the database.** Its pod writes the restored
   data to an `emptyDir` capped at `spec.storage.size`, so the node needs that much ephemeral
   storage while it runs.
@@ -206,7 +237,7 @@ kubectl run psql --rm -it --restart=Never --image=postgres:17 -- \
 | `internal/webhook/v1alpha1/` | The validating admission webhook |
 | `config/` | Raw kustomize manifests (CRD, RBAC, manager, webhook, cert-manager) |
 | `charts/postgres-operator/` | The Helm chart (see its own README for the `crds/` caveat) |
-| `docs/` | Backup and restore runbook, bucket policy, sizing and alerting |
+| `docs/` | Backup and restore runbook; the compliance guide, with what a preset does and does not do |
 | `images/` | The pinned upstream Spilo release and the workflow inputs for the database images |
 | `test/e2e/` | End-to-end tests that deploy the full stack into a real Kind cluster and break real clusters |
 

@@ -23,6 +23,15 @@ helm install postgres-operator charts/postgres-operator \
   --set controllerManager.manager.image.tag=<your-image-tag>
 ```
 
+## Compliance clusters and network policies
+
+A `PostgresCluster` with `spec.compliance` gets a `NetworkPolicy` that has to let the operator
+through to Patroni. The operator finds its own pods by reading its own pod at start, so the
+manager Deployment sets `POD_NAME` and `POD_NAMESPACE` from the downward API, and the chart's RBAC
+lets the operator manage `networkpolicies`. If you replace the Deployment, keep both variables, or
+clusters with compliance settings will be held back with a message saying why. See
+[`docs/compliance.md`](../../docs/compliance.md).
+
 ## The CRD lives in `crds/`, not `templates/` - on purpose
 
 Helm treats `crds/` specially: those manifests are applied once on
