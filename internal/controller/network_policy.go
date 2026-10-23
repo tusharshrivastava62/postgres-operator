@@ -140,8 +140,10 @@ func desiredNetworkPolicy(cluster *dbv1alpha1.PostgresCluster, operator *Operato
 				{From: []networkingv1.NetworkPolicyPeer{ownPods}, Ports: []networkingv1.NetworkPolicyPort{
 					{Protocol: &tcp, Port: &postgres}, {Protocol: &tcp, Port: &patroni}}},
 				{From: []networkingv1.NetworkPolicyPeer{ownJobs}, Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &postgres}}},
-				// The operator applies spec.ha and asks for a switchover.
-				{From: []networkingv1.NetworkPolicyPeer{operatorPods}, Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &patroni}}},
+				// The operator applies spec.ha and asks for a switchover on
+				// 8008, and manages the database's roles over SQL on 5432.
+				{From: []networkingv1.NetworkPolicyPeer{operatorPods}, Ports: []networkingv1.NetworkPolicyPort{
+					{Protocol: &tcp, Port: &postgres}, {Protocol: &tcp, Port: &patroni}}},
 			},
 		},
 	}, nil

@@ -93,12 +93,14 @@ var _ = Describe("The compliance check CronJob", func() {
 		Expect(pod.Containers[0].VolumeMounts[0].ReadOnly).To(BeTrue())
 	})
 
-	It("reaches the database through the read-write Service over TLS, as the superuser, with the Secret's password", func() {
+	It("reaches the database through the read-write Service over TLS, as the monitor role, with the Secret's password", func() {
 		env := envByName(podOf(spec()).Containers[0].Env)
 		Expect(env["PGHOST"].Value).To(Equal(sourceName))
 		Expect(env["PGSSLMODE"].Value).To(Equal("require"))
 		Expect(env["PGPASSWORD"].Value).To(BeEmpty())
-		Expect(env["PGPASSWORD"].ValueFrom.SecretKeyRef.Name).To(Equal("orders-credentials"))
+		Expect(env["PGPASSWORD"].ValueFrom.SecretKeyRef.Name).To(Equal("orders-monitor"))
+		Expect(env["PGPASSWORD"].ValueFrom.SecretKeyRef.Key).To(Equal(secretKeyPassword))
+		Expect(env["PGUSER"].ValueFrom.SecretKeyRef.Name).To(Equal("orders-monitor"))
 		Expect(env["PGUSER"].ValueFrom.SecretKeyRef.Key).To(Equal(secretKeyUsername))
 	})
 
@@ -172,7 +174,7 @@ var _ = Describe("The compliance pods' reports wake the reconciler", func() {
 	for _, component := range []string{componentComplianceCheck, componentNetworkProbe} {
 		It("maps a "+component+" pod to its cluster", func() {
 			requests := clusterForObject(context.Background(), &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-				Namespace: "prod",
+				Namespace: sourceNamespace,
 				Labels:    map[string]string{labelAppName: appNameValue, labelAppInstance: sourceName, labelAppComponent: component},
 			}})
 			Expect(requests).To(HaveLen(1))
@@ -478,10 +480,17 @@ class Client:
 			script, err := os.ReadFile("scripts/compliance_check.py")
 			Expect(err).NotTo(HaveOccurred())
 			for _, setting := range []string{"shared_preload_libraries", "pgaudit.log", settingLogConnections, "log_disconnections", "ssl",
-				"password_encryption", "data_checksums", "pg_hba_file_rules", "pg_authid",
+				"password_encryption", "data_checksums", "pg_hba_file_rules", "pgoperator.non_scram_roles()",
 				"netmask"} { // the mask is what tells a loopback-only rule from one that only starts at 127.0.0.1
 				Expect(string(script)).To(ContainSubstring(setting))
 			}
+		})
+
+		It("never reads pg_authid itself: the monitor role cannot, and password hashes stay out of reach", func() {
+			script, err := os.ReadFile("scripts/compliance_check.py")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(script)).NotTo(ContainSubstring("pg_authid"))
+			Expect(string(script)).NotTo(ContainSubstring("pg_shadow"))
 		})
 	})
 

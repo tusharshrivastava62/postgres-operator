@@ -42,7 +42,10 @@ Apply that, and the operator's reconcile loop takes it from there.
   (`<name>` always routes to the primary, `<name>-readonly` to replicas, plus a headless and a
   config one), a `PodDisruptionBudget`, the `ServiceAccount`/`Role`/`RoleBinding` Patroni needs,
   and a `Secret` with randomly generated superuser and replication passwords - generated once,
-  never rewritten, so nothing rotates auth out from under a running cluster.
+  never rewritten, so nothing rotates auth out from under a running cluster. A cluster with
+  backups or compliance settings also gets a read-only database role, `pgoperator_monitor`, with a
+  `<name>-monitor` Secret: the jobs that read the database connect as it, so none of them holds the
+  superuser's password.
 - **Fails over.** Losing the primary promotes a replica; on a 3-instance cluster that took
   about 2 seconds for a graceful stop. Failover timing, the permitted replica lag, and
   synchronous replication are set under `spec.ha` and applied to the running cluster without

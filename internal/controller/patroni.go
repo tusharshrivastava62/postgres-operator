@@ -225,6 +225,36 @@ func sameValue(want, got any) bool {
 	}
 }
 
+// leaderAddress names the pod holding the leader lock and returns its IP. The
+// address is empty, without an error, while there is no leader to talk to: as
+// during creation or a failover, or when the leader's pod has no address yet.
+func (r *PostgresClusterReconciler) leaderAddress(ctx context.Context, cluster *dbv1alpha1.PostgresCluster) (name, address string, err error) {
+	// Core Endpoints are deprecated in Kubernetes, but they are where Patroni
+	// keeps the leader record, so they are what has to be read.
+	endpoints := &corev1.Endpoints{} //nolint:staticcheck // Patroni's Kubernetes DCS stores the leader on Endpoints
+	err = r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: cluster.Name}, endpoints)
+	if apierrors.IsNotFound(err) {
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	name = endpoints.Annotations[annotationLeader]
+	if name == "" {
+		return "", "", nil
+	}
+
+	pod := &corev1.Pod{}
+	err = r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: name}, pod)
+	if apierrors.IsNotFound(err) {
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	return name, pod.Status.PodIP, nil
+}
+
 // syncPatroniConfig makes the running cluster's dynamic configuration match
 // spec.ha. It reports whether that was possible.
 //
@@ -241,30 +271,11 @@ func sameValue(want, got any) bool {
 func (r *PostgresClusterReconciler) syncPatroniConfig(ctx context.Context, cluster *dbv1alpha1.PostgresCluster) (bool, error) {
 	log := logf.FromContext(ctx)
 
-	// Core Endpoints are deprecated in Kubernetes, but they are where Patroni
-	// keeps the leader record, so they are what has to be read.
-	endpoints := &corev1.Endpoints{} //nolint:staticcheck // Patroni's Kubernetes DCS stores the leader on Endpoints
-	err := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: cluster.Name}, endpoints)
-	if apierrors.IsNotFound(err) {
-		return false, nil
-	}
+	leader, address, err := r.leaderAddress(ctx, cluster)
 	if err != nil {
 		return false, err
 	}
-	leader := endpoints.Annotations[annotationLeader]
-	if leader == "" {
-		return false, nil
-	}
-
-	pod := &corev1.Pod{}
-	err = r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: leader}, pod)
-	if apierrors.IsNotFound(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if pod.Status.PodIP == "" {
+	if address == "" {
 		return false, nil
 	}
 
@@ -272,7 +283,7 @@ func (r *PostgresClusterReconciler) syncPatroniConfig(ctx context.Context, clust
 	if api == nil {
 		api = defaultPatroni
 	}
-	live, err := api.GetConfig(ctx, pod.Status.PodIP)
+	live, err := api.GetConfig(ctx, address)
 	if err != nil {
 		// The leader named in the DCS may be the old one, still shutting
 		// down, so this is expected during a failover.
@@ -286,7 +297,7 @@ func (r *PostgresClusterReconciler) syncPatroniConfig(ctx context.Context, clust
 	if len(diff) == 0 {
 		return true, nil
 	}
-	if err := api.PatchConfig(ctx, pod.Status.PodIP, diff); err != nil {
+	if err := api.PatchConfig(ctx, address, diff); err != nil {
 		return false, fmt.Errorf("updating Patroni configuration on %s: %w", leader, err)
 	}
 	log.Info("updated Patroni configuration", "leader", leader, "changed", diff)

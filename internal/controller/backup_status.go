@@ -182,8 +182,8 @@ func backupStatusCronJobSpec(cluster *dbv1alpha1.PostgresCluster, image string) 
 		{Name: "PGDATABASE", Value: "postgres"},
 		{Name: "PGSSLMODE", Value: "require"},
 		{Name: "PGCONNECT_TIMEOUT", Value: "10"},
-		{Name: "PGUSER", ValueFrom: secretKeyRef(cluster, secretKeyUsername)},
-		{Name: "PGPASSWORD", ValueFrom: secretKeyRef(cluster, secretKeyPassword)},
+		{Name: "PGUSER", ValueFrom: monitorSecretKeyRef(cluster, secretKeyUsername)},
+		{Name: "PGPASSWORD", ValueFrom: monitorSecretKeyRef(cluster, secretKeyPassword)},
 	}, walgClientEnv(cluster)...)
 
 	return batchv1.CronJobSpec{

@@ -466,9 +466,21 @@ spec:
 			expectHealthy(g)
 		}, clusterUpTimeout+5*time.Minute, pollEvery).Should(Succeed())
 
+		By("making the read-only role the backup status job connects as, with a Secret of its own")
+		Eventually(func() (string, error) { return clusterField(".status.accessControl.monitorRole.state") },
+			3*time.Minute, pollEvery).Should(Equal("Ready"))
+		secrets, err := cronJobSecrets(clusterName + "-backup-status")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(secrets).To(ContainSubstring(clusterName + "-monitor"))
+		Expect(secrets).NotTo(ContainSubstring(clusterName+"-credentials"), "no job holds the superuser's password")
+
 		By("finding a base backup in the bucket, read back with the key")
 		primary, err := clusterField(".status.primaryInstance")
 		Expect(err).NotTo(HaveOccurred())
+		attributes, err := monitorRoleAttributes(primary)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(attributes).To(Equal("f|f|f|f|f|t|5|pg_read_all_settings"),
+			"no superuser, create database, create role, replication or bypass-RLS; five connections; one membership")
 		list := `envdir /run/etc/wal-e.d/env wal-g backup-list 2>/dev/null | grep -c '^base_'`
 		Eventually(func(g Gomega) {
 			out, err := runInPod(primary, list)
@@ -963,8 +975,46 @@ print(append_extensions('bg_mon,pg_stat_statements,pgextwlist,pg_auth_mon,set_us
 			return inCluster("get", "job", "status-under-policy", "-o", "jsonpath={.status.succeeded}")
 		}, 5*time.Minute, pollEvery).Should(Equal("1"), "the cluster's own job reaches the database through the policy")
 
+		By("connecting from the operator on port 5432 under the policy, as the read-only role, and giving the jobs nothing more")
+		operatorPorts, err := inCluster("get", "networkpolicy", clusterName, "-o",
+			`jsonpath={.spec.ingress[?(@.from[0].namespaceSelector)].ports[*].port}`)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.Fields(operatorPorts)).To(ConsistOf("5432", "8008"), "the rule that lets the operator in opens both ports")
+		operatorIP, err := kubectlOut("-n", namespace, "get", "pods", "-l", "control-plane=controller-manager",
+			"-o", "jsonpath={.items[0].status.podIP}")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(operatorIP).NotTo(BeEmpty())
+		Eventually(func(g Gomega) {
+			g.Expect(clusterField(".status.accessControl.monitorRole.state")).To(Equal("Ready"))
+			// The server's own record of who connected, from where: the operator
+			// logs in as the monitor role every few minutes, from its pod's address.
+			found := false
+			for _, pod := range pods() {
+				log := auditLog(pod)
+				for line := range strings.SplitSeq(log, "\n") {
+					if strings.Contains(line, "connection authorized: user="+monitorRole) &&
+						strings.Contains(line, `"`+operatorIP+":") && strings.Contains(line, "application_name=postgres-operator") {
+						found = true
+					}
+				}
+			}
+			g.Expect(found).To(BeTrue(), "the server log shows the operator, at %s, connecting as %s", operatorIP, monitorRole)
+		}, 8*time.Minute, pollEvery).Should(Succeed())
+		for _, job := range []string{"backup-status", "restore-verify", "compliance-check", "network-probe"} {
+			secrets, err := cronJobSecrets(clusterName + "-" + job)
+			Expect(err).NotTo(HaveOccurred(), job)
+			Expect(secrets).NotTo(ContainSubstring(clusterName+"-credentials"), job+" holds no superuser credentials")
+		}
 		primaryIP, err := inCluster("get", "pod", primary, "-o", "jsonpath={.status.podIP}")
 		Expect(err).NotTo(HaveOccurred())
+		for _, probe := range []string{"select * from pg_authid", "select pg_read_file('/etc/passwd')", "select set_user_u('postgres')"} {
+			out, err := asMonitor(primary, primaryIP, probe)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out).To(ContainSubstring("permission denied"), probe)
+		}
+		out, err := asMonitor(primary, primaryIP, "select pgoperator.non_scram_roles()")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.TrimSpace(out)).To(Equal("0"), "the one thing it may ask of the password table")
 		service := clusterName + "." + clusterNamespace + ".svc.cluster.local"
 		client := map[string]string{clientLabel: clientLabelValue}
 		_, err = kubectlOut("create", "namespace", "e2e-other")

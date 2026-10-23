@@ -66,6 +66,15 @@ type PostgresClusterReconciler struct {
 	// because the status field is cleared in the gap between two primaries,
 	// which is the very moment that has to be remembered.
 	lastPrimary sync.Map
+
+	// SQL is how the operator runs SQL against a cluster. Left nil, the
+	// operator runs none, and does not manage database roles: tests that are
+	// not about roles leave it out, and the manager always sets it.
+	SQL SQLDialer
+
+	// monitorVerified remembers, per cluster, when the monitor role was last
+	// found in order, see reconcileMonitorRole.
+	monitorVerified sync.Map
 }
 
 // +kubebuilder:rbac:groups=db.youroperator.io,resources=postgresclusters,verbs=get;list;watch;create;update;patch;delete
@@ -214,6 +223,7 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		run     func() error
 	}{
 		{"reconciling secret", func() error { return r.reconcileSecret(ctx, cluster) }},
+		{"reconciling the monitor secret", func() error { return r.reconcileMonitorSecret(ctx, cluster) }},
 		{"reconciling patroni access", func() error { return r.reconcilePatroniAccess(ctx, cluster) }},
 		{"reconciling services", func() error { return r.reconcileServices(ctx, cluster) }},
 		{"reconciling pod disruption budget", func() error { return r.reconcilePodDisruptionBudget(ctx, cluster) }},
@@ -249,17 +259,31 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, fmt.Errorf("syncing patroni configuration: %w", err)
 	}
 
+	// Needs a primary, and so comes after everything that creates one. A role
+	// that is not ready yet is looked at again soon.
+	monitorReady, err := r.reconcileMonitorRole(ctx, cluster)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling the monitor role: %w", err)
+	}
+
 	log.Info("reconciled PostgresCluster", "instances", cluster.Spec.Instances, "version", cluster.Spec.Version, "image", image)
 	// Pod and Endpoints events trigger most re-observation, but replication
 	// lag and an expiring leader lock change without one, so keep looking:
 	// often while something is wrong, rarely when all is well.
-	if rolling {
-		return ctrl.Result{RequeueAfter: rolloutRequeueDelay}, nil
+	return ctrl.Result{RequeueAfter: refreshDelay(rolling, synced, view.healthy, monitorReady)}, nil
+}
+
+// refreshDelay is how long to wait before looking at a cluster again: soon
+// while it is being rolled, often while something is not as it should be, and
+// rarely otherwise.
+func refreshDelay(rolling, synced, healthy, monitorReady bool) time.Duration {
+	switch {
+	case rolling:
+		return rolloutRequeueDelay
+	case !synced || !healthy || !monitorReady:
+		return unhealthyRefreshInterval
 	}
-	if !synced || !view.healthy {
-		return ctrl.Result{RequeueAfter: unhealthyRefreshInterval}, nil
-	}
-	return ctrl.Result{RequeueAfter: healthyRefreshInterval}, nil
+	return healthyRefreshInterval
 }
 
 // reconcileDeleted runs after a PostgresCluster is gone. The StatefulSet and
@@ -274,6 +298,7 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 func (r *PostgresClusterReconciler) reconcileDeleted(ctx context.Context, key types.NamespacedName) (ctrl.Result, error) {
 	// The cluster is gone, so stop reporting on it whatever happens next.
 	r.forgetMetrics(key)
+	r.monitorVerified.Delete(key.String())
 
 	sts := &appsv1.StatefulSet{}
 	err := r.Get(ctx, key, sts)

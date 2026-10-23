@@ -190,6 +190,7 @@ func main() {
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		Operator: operator,
+		SQL:      controller.NewPGXDialer(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "postgrescluster")
 		os.Exit(1)

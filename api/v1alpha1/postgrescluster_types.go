@@ -413,6 +413,10 @@ type PostgresClusterStatus struct {
 	// +optional
 	Compliance ComplianceStatus `json:"compliance,omitzero"`
 
+	// accessControl reports the database roles the operator manages.
+	// +optional
+	AccessControl AccessControlStatus `json:"accessControl,omitzero"`
+
 	// conditions represent the current state of the PostgresCluster resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//
@@ -431,6 +435,48 @@ type PostgresClusterStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// Role states.
+const (
+	// RoleReady means the role exists, with the privileges the operator gave
+	// it and the password in its Secret.
+	RoleReady = "Ready"
+	// RolePending means the operator has not been able to set the role up
+	// yet, for example because the cluster has no primary.
+	RolePending = "Pending"
+	// RoleError means the operator tried and could not.
+	RoleError = "Error"
+)
+
+// AccessControlStatus is what the operator last observed about the database
+// roles it manages.
+type AccessControlStatus struct {
+	// monitorRole is the read-only role the operator's own jobs connect as,
+	// so that none of them holds the superuser password.
+	// +optional
+	MonitorRole RoleStatus `json:"monitorRole,omitzero"`
+}
+
+// RoleStatus is the state of one role the operator manages.
+type RoleStatus struct {
+	// name is the role's name in the database.
+	// +optional
+	Name string `json:"name,omitempty"`
+
+	// state is Ready, Pending or Error.
+	// +kubebuilder:validation:Enum=Ready;Pending;Error
+	// +optional
+	State string `json:"state,omitempty"`
+
+	// secretName is the Secret holding the role's username and password.
+	// +optional
+	SecretName string `json:"secretName,omitempty"`
+
+	// message says what is wrong when the state is not Ready.
+	// +kubebuilder:validation:MaxLength=512
+	// +optional
+	Message string `json:"message,omitempty"`
 }
 
 // ComplianceStatus is what the operator last observed about the controls of

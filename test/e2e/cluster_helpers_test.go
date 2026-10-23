@@ -14,6 +14,7 @@ package e2e
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -400,4 +401,37 @@ func runComplianceJobs(suffix string) {
 			return inCluster("get", "job", job, "-o", "jsonpath={.status.succeeded}")
 		}, 5*time.Minute, pollEvery).Should(Equal("1"), job)
 	}
+}
+
+const monitorRole = "pgoperator_monitor"
+
+// monitorRoleAttributes reads the monitor role's attributes back from the
+// database: superuser, create database, create role, replication, bypass RLS,
+// can log in, connection limit, and the roles it is a member of.
+func monitorRoleAttributes(pod string) (string, error) {
+	return psql(pod, "", "select rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls, rolcanlogin, rolconnlimit, "+
+		"(select string_agg(pg_get_userbyid(roleid), ',') from pg_auth_members where member = r.oid) "+
+		"from pg_roles r where rolname = '"+monitorRole+"'")
+}
+
+// cronJobSecrets lists the Secrets a CronJob's containers read as environment
+// variables.
+func cronJobSecrets(name string) (string, error) {
+	return inCluster("get", "cronjob", name, "-o",
+		"jsonpath={.spec.jobTemplate.spec.template.spec.containers[*].env[*].valueFrom.secretKeyRef.name}")
+}
+
+// asMonitor runs one statement on a database pod over TCP, as the monitor
+// role with the password in its Secret.
+func asMonitor(pod, host, sql string) (string, error) {
+	encoded, err := inCluster("get", "secret", clusterName+"-monitor", "-o", "jsonpath={.data.password}")
+	if err != nil {
+		return "", err
+	}
+	password, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", err
+	}
+	return runInPod(pod, fmt.Sprintf(`PGPASSWORD='%s' PGSSLMODE=require psql -X -At -h %s -U %s -d postgres -c "%s" 2>&1`,
+		password, host, monitorRole, sql))
 }

@@ -54,8 +54,7 @@ select json_build_object(
                                                       'user', user_name, 'addr', address, 'mask', netmask) order by line_number), '[]'::json)
           from pg_hba_file_rules where error is null),
   'hbaErrors', (select count(*) from pg_hba_file_rules where error is not null),
-  'nonScramRoles', (select count(*) from pg_authid
-                    where rolpassword is not null and rolpassword not like 'SCRAM-SHA-256$%%')
+  'nonScramRoles', (select pgoperator.non_scram_roles())
 )
 """ % ", ".join("'%s'" % name for name in SETTINGS)
 

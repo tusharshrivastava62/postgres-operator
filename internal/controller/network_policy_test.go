@@ -34,6 +34,7 @@ import (
 const (
 	labelApp          = "app"
 	apiApp            = "api"
+	otherApp          = "other"
 	controlPlaneLabel = "control-plane"
 	controllerManager = "controller-manager"
 	operatorName      = "postgres-operator"
@@ -57,7 +58,7 @@ func matches(selector *metav1.LabelSelector, podLabels map[string]string) bool {
 var _ = Describe("The network policy", func() {
 	cluster := func() *dbv1alpha1.PostgresCluster {
 		c := withCompliance(plainCluster(), dbv1alpha1.StandardHIPAA)
-		c.Name, c.Namespace = "orders", sourceNamespace
+		c.Name, c.Namespace = sourceName, sourceNamespace
 		return c
 	}
 	build := func(c *dbv1alpha1.PostgresCluster) *networkingv1.NetworkPolicy {
@@ -153,8 +154,18 @@ var _ = Describe("The network policy", func() {
 			}}
 			policy := build(c)
 			Expect(reaches(policy, "apps", map[string]string{labelApp: apiApp}, postgresPort)).To(BeTrue())
-			Expect(reaches(policy, "apps", map[string]string{labelApp: "other"}, postgresPort)).To(BeFalse())
+			Expect(reaches(policy, "apps", map[string]string{labelApp: otherApp}, postgresPort)).To(BeFalse())
 			Expect(reaches(policy, sourceNamespace, map[string]string{labelApp: apiApp}, postgresPort)).To(BeFalse())
+		})
+
+		It("lets the operator in, from its own pods only, so it can manage the database's roles", func() {
+			policy := build(cluster())
+			Expect(reaches(policy, testOperator.Namespace, testOperator.PodLabels, postgresPort)).To(BeTrue())
+			Expect(reaches(policy, testOperator.Namespace, map[string]string{labelApp: otherApp}, postgresPort)).To(BeFalse(),
+				"another pod in the operator's namespace")
+			Expect(reaches(policy, sourceNamespace, testOperator.PodLabels, postgresPort)).To(BeFalse(),
+				"the operator's labels in the cluster's namespace")
+			Expect(reaches(policy, "staging", testOperator.PodLabels, postgresPort)).To(BeFalse())
 		})
 
 		It("does not change the spec when it adds them", func() {
@@ -182,7 +193,7 @@ var _ = Describe("The network policy", func() {
 
 		It("keeps out the operator's namespace for any other pod, and any other namespace for a pod labelled like the operator", func() {
 			policy := build(cluster())
-			Expect(reaches(policy, testOperator.Namespace, map[string]string{labelApp: "other"}, patroniPort)).To(BeFalse())
+			Expect(reaches(policy, testOperator.Namespace, map[string]string{labelApp: otherApp}, patroniPort)).To(BeFalse())
 			Expect(reaches(policy, sourceNamespace, testOperator.PodLabels, patroniPort)).To(BeFalse())
 			Expect(reaches(policy, "staging", testOperator.PodLabels, patroniPort)).To(BeFalse())
 		})

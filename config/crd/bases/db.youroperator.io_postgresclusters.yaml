@@ -723,6 +723,36 @@ spec:
           status:
             description: status defines the observed state of PostgresCluster
             properties:
+              accessControl:
+                description: accessControl reports the database roles the operator
+                  manages.
+                properties:
+                  monitorRole:
+                    description: |-
+                      monitorRole is the read-only role the operator's own jobs connect as,
+                      so that none of them holds the superuser password.
+                    properties:
+                      message:
+                        description: message says what is wrong when the state is
+                          not Ready.
+                        maxLength: 512
+                        type: string
+                      name:
+                        description: name is the role's name in the database.
+                        type: string
+                      secretName:
+                        description: secretName is the Secret holding the role's username
+                          and password.
+                        type: string
+                      state:
+                        description: state is Ready, Pending or Error.
+                        enum:
+                        - Ready
+                        - Pending
+                        - Error
+                        type: string
+                    type: object
+                type: object
               backup:
                 description: backup reports what can be restored and how healthy backing
                   up is.

@@ -318,11 +318,12 @@ var _ = Describe("The backup status CronJob", func() {
 		Expect(*spec.JobTemplate.Spec.ActiveDeadlineSeconds).To(BeNumerically(">", 0))
 	})
 
-	It("reaches the database over TLS with the cluster's own credentials", func() {
+	It("reaches the database over TLS as the read-only monitor role", func() {
 		env := envMap(backupStatusCronJobSpec(cluster(), "img").JobTemplate.Spec.Template.Spec.Containers[0].Env)
 		Expect(env["PGHOST"].Value).To(Equal("orders"))
 		Expect(env["PGSSLMODE"].Value).To(Equal("require"))
-		Expect(env["PGPASSWORD"].ValueFrom.SecretKeyRef.Name).To(Equal("orders-credentials"))
+		Expect(env["PGUSER"].ValueFrom.SecretKeyRef.Name).To(Equal("orders-monitor"))
+		Expect(env["PGPASSWORD"].ValueFrom.SecretKeyRef.Name).To(Equal("orders-monitor"))
 		Expect(env["PGPASSWORD"].Value).To(BeEmpty())
 	})
 

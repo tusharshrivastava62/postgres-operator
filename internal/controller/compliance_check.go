@@ -157,9 +157,9 @@ func cronJob(labels map[string]string, pod corev1.PodSpec, deadline int64) batch
 	}
 }
 
-// complianceCheckCronJobSpec reads the database over SQL, as the superuser
-// (as the backup status check does), and the audit bucket, with the audit
-// destination's credentials. It is one of the cluster's own jobs, so the
+// complianceCheckCronJobSpec reads the database over SQL, as the read-only
+// monitor role (as the backup status check does), and the audit bucket, with
+// the audit destination's credentials. It is one of the cluster's own jobs, so the
 // network policy lets it reach the database.
 func complianceCheckCronJobSpec(cluster *dbv1alpha1.PostgresCluster, image string) batchv1.CronJobSpec {
 	dest := cluster.Spec.Compliance.AuditLogs.Destination
@@ -170,8 +170,8 @@ func complianceCheckCronJobSpec(cluster *dbv1alpha1.PostgresCluster, image strin
 		{Name: "PGDATABASE", Value: "postgres"},
 		{Name: "PGSSLMODE", Value: "require"},
 		{Name: "PGCONNECT_TIMEOUT", Value: "10"},
-		{Name: "PGUSER", ValueFrom: secretKeyRef(cluster, secretKeyUsername)},
-		{Name: "PGPASSWORD", ValueFrom: secretKeyRef(cluster, secretKeyPassword)},
+		{Name: "PGUSER", ValueFrom: monitorSecretKeyRef(cluster, secretKeyUsername)},
+		{Name: "PGPASSWORD", ValueFrom: monitorSecretKeyRef(cluster, secretKeyPassword)},
 		{Name: "AUDIT_BUCKET", Value: dest.Bucket},
 		{Name: "AUDIT_PREFIX", Value: cluster.Spec.Compliance.AuditPathFor(cluster.Namespace, cluster.Name)},
 		{Name: "AUDIT_ENDPOINT", Value: dest.Endpoint},

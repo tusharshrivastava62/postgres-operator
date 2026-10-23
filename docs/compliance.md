@@ -96,9 +96,10 @@ All three standards check the same ten controls; the only differences are the st
 and the default retention.
 
 **The network policy** admits, to PostgreSQL (5432): pods labelled as clients in the cluster's own
-namespace, any peers you list in `allowFrom`, the cluster's own pods, and its own jobs. It admits,
-to Patroni's REST port (8008): the cluster's own pods and the operator, and nothing else. Only
-ingress is restricted. Egress is not.
+namespace, any peers you list in `allowFrom`, the cluster's own pods, its own jobs, and the
+operator, which manages the database's roles over SQL. It admits, to Patroni's REST port (8008):
+the cluster's own pods and the operator, and nothing else. Only ingress is restricted. Egress is
+not.
 
 **`logParameters` writes values in clear text.** With it on, the values bound to a statement's
 parameters are written to the audit log. With it off they are not. Even with it off, the text of a
@@ -125,8 +126,11 @@ minutes old.
 | `backup-recovery` | **The operator's own status:** backups are on, encrypted, healthy, and a restore test has passed. See [backup-and-restore.md](backup-and-restore.md). |
 | `availability` | **The operator's own status:** more than one instance, a ready primary, and replication healthy. |
 
-The first seven are read by the compliance check job, which connects to the database as the
-superuser, as the backup status job does, and reads the audit bucket. `network-isolation` also
+The first seven are read by the compliance check job, which connects to the database as a
+read-only role, `pgoperator_monitor`, as the backup status job does, and reads the audit bucket.
+That role can read the server's settings, the connection rules, and a count of the roles whose
+password is not stored as SCRAM-SHA-256; it cannot read data, the password hashes, or other
+sessions' queries, or change anything. No job holds the superuser's password. `network-isolation` also
 uses the network probe, a pod that carries none of the labels the policy admits and tries to
 connect. The jobs report facts; the operator decides what the facts mean.
 
@@ -192,8 +196,8 @@ client is a declaration by the pod, so anyone who can create pods in the namespa
 themselves access. Namespace permissions are outside what is checked.
 
 **Who can do what inside the database.** No least-privilege checks, no password rotation, no
-review of roles. The operator's jobs connect as the superuser, and its passwords are never
-rotated.
+review of roles. The operator's jobs connect as the read-only role, and the passwords of that
+role and of the superuser are never rotated.
 
 **The cluster around it.** Kubernetes RBAC, who can read Secrets, node security, image
 provenance, and the host the cluster runs on.
