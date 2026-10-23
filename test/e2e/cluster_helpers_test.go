@@ -422,7 +422,8 @@ func cronJobSecrets(name string) (string, error) {
 }
 
 // asMonitor runs one statement on a database pod over TCP, as the monitor
-// role with the password in its Secret.
+// role with the password in its Secret. A statement the server refuses is not an
+// error here: its answer is the output, so a test can read the refusal.
 func asMonitor(pod, host, sql string) (string, error) {
 	encoded, err := inCluster("get", "secret", clusterName+"-monitor", "-o", "jsonpath={.data.password}")
 	if err != nil {
@@ -432,6 +433,6 @@ func asMonitor(pod, host, sql string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return runInPod(pod, fmt.Sprintf(`PGPASSWORD='%s' PGSSLMODE=require psql -X -At -h %s -U %s -d postgres -c "%s" 2>&1`,
+	return runInPod(pod, fmt.Sprintf(`PGPASSWORD='%s' PGSSLMODE=require psql -X -At -h %s -U %s -d postgres -c "%s" 2>&1 || true`,
 		password, host, monitorRole, sql))
 }
