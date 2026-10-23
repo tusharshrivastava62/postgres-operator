@@ -55,9 +55,15 @@ type fakeSQL struct {
 	// unreachable, when set, is what every Dial fails with: the network is down.
 	unreachable error
 
+	// observed is what the role query answers with; execFailure, if it
+	// returns an error for a statement, is what running that statement does.
+	observed    string
+	execFailure func(statement string) error
+
 	dials    []SQLTarget
 	executed []string
 	queries  []string
+	queried  []string
 }
 
 func (f *fakeSQL) Dial(_ context.Context, target SQLTarget) (SQLSession, error) {
@@ -107,6 +113,11 @@ func (s *fakeSession) Exec(_ context.Context, sql string) error {
 		return &pgconn.PgError{Code: "42501", Message: "permission denied"}
 	}
 	s.db.executed = append(s.db.executed, sql)
+	if s.db.execFailure != nil {
+		if err := s.db.execFailure(sql); err != nil {
+			return err
+		}
+	}
 	if m := verifierInSQL.FindString(sql); m != "" {
 		// Believe the password only if the statement is the verifier of it.
 		s.db.monitorPassword = s.db.passwordHashedBy(m)
@@ -134,6 +145,14 @@ func (s *fakeSession) QueryBool(_ context.Context, sql string) (bool, error) {
 	defer s.db.mu.Unlock()
 	s.db.queries = append(s.db.queries, s.user)
 	return s.db.monitorPrivileged, nil
+}
+
+func (s *fakeSession) QueryText(_ context.Context, sql string) (string, error) {
+	s.db.mu.Lock()
+	defer s.db.mu.Unlock()
+	s.db.queries = append(s.db.queries, s.user)
+	s.db.queried = append(s.db.queried, sql)
+	return s.db.observed, nil
 }
 
 func (s *fakeSession) Close(context.Context) {}
@@ -464,16 +483,17 @@ var _ = Describe("The monitor role", func() {
 
 	Describe("how soon the cluster is looked at again", func() {
 		It("is slowly only when everything is well", func() {
-			Expect(refreshDelay(false, true, true, true)).To(Equal(healthyRefreshInterval))
+			Expect(refreshDelay(false, true, true, true, true)).To(Equal(healthyRefreshInterval))
 		})
 		It("is quickly when any one thing is not", func() {
-			Expect(refreshDelay(false, false, true, true)).To(Equal(unhealthyRefreshInterval), "Patroni's configuration not synced")
-			Expect(refreshDelay(false, true, false, true)).To(Equal(unhealthyRefreshInterval), "the cluster is unhealthy")
-			Expect(refreshDelay(false, true, true, false)).To(Equal(unhealthyRefreshInterval), "the monitor role is not ready")
+			Expect(refreshDelay(false, false, true, true, true)).To(Equal(unhealthyRefreshInterval), "Patroni's configuration not synced")
+			Expect(refreshDelay(false, true, false, true, true)).To(Equal(unhealthyRefreshInterval), "the cluster is unhealthy")
+			Expect(refreshDelay(false, true, true, false, true)).To(Equal(unhealthyRefreshInterval), "the monitor role is not ready")
+			Expect(refreshDelay(false, true, true, true, false)).To(Equal(unhealthyRefreshInterval), "an application role is not ready")
 		})
 		It("is soonest during a rolling update", func() {
-			Expect(refreshDelay(true, true, true, true)).To(Equal(rolloutRequeueDelay))
-			Expect(refreshDelay(true, false, false, false)).To(Equal(rolloutRequeueDelay))
+			Expect(refreshDelay(true, true, true, true, true)).To(Equal(rolloutRequeueDelay))
+			Expect(refreshDelay(true, false, false, false, false)).To(Equal(rolloutRequeueDelay))
 		})
 	})
 

@@ -278,17 +278,14 @@ func (r *PostgresClusterReconciler) verifyMonitorRole(ctx context.Context, targe
 
 // setUpMonitorRole runs the setup as the superuser.
 func (r *PostgresClusterReconciler) setUpMonitorRole(ctx context.Context, cluster *dbv1alpha1.PostgresCluster, monitor SQLTarget) error {
-	creds := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: credentialsSecretName(cluster)}, creds); err != nil {
-		return fmt.Errorf("reading the superuser credentials: %w", err)
-	}
 	verifier, err := newScramVerifier(monitor.Password)
 	if err != nil {
 		return err
 	}
-	superuser := monitor
-	superuser.User = string(creds.Data[secretKeyUsername])
-	superuser.Password = string(creds.Data[secretKeyPassword])
+	superuser, err := r.superuserTarget(ctx, cluster, monitor.Host)
+	if err != nil {
+		return err
+	}
 	session, err := r.SQL.Dial(ctx, superuser)
 	if err != nil {
 		return fmt.Errorf("connecting as the superuser: %w", err)

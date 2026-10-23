@@ -75,6 +75,10 @@ type PostgresClusterReconciler struct {
 	// monitorVerified remembers, per cluster, when the monitor role was last
 	// found in order, see reconcileMonitorRole.
 	monitorVerified sync.Map
+
+	// rolesVerified remembers, per cluster, when its application roles were
+	// last found in order, see reconcileRoles.
+	rolesVerified sync.Map
 }
 
 // +kubebuilder:rbac:groups=db.youroperator.io,resources=postgresclusters,verbs=get;list;watch;create;update;patch;delete
@@ -162,6 +166,15 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{RequeueAfter: backupSecretRecheckDelay}, r.markInvalidSpec(ctx, cluster, "BackupSecretProblem", problem)
 	}
 
+	// The webhook refuses roles that clash with the system's own, or with each
+	// other's Secrets, but a webhook is not always there. Roles are made with
+	// the superuser, so a name that slipped through must not reach it.
+	if errs := cluster.Spec.ValidateRoles(cluster.Name); len(errs) > 0 {
+		message := errs.ToAggregate().Error()
+		log.Info("not reconciling: invalid spec.roles: " + message)
+		return ctrl.Result{}, r.markInvalidSpec(ctx, cluster, "InvalidRoles", message)
+	}
+
 	// A network policy has to name the operator, or it would cut the operator
 	// off from Patroni. Without knowing which pods it is, build nothing.
 	if networkPolicyWanted(cluster) && r.Operator == nil {
@@ -218,12 +231,17 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// Patroni's access objects (see reconcilePatroniAccess), and they must never
 	// be reachable by more than their network policy allows, nor start without
 	// the script they mount (see reconcileStatefulSet).
+	var roleSecretProblems map[string]string
 	steps := []struct {
 		failure string
 		run     func() error
 	}{
 		{"reconciling secret", func() error { return r.reconcileSecret(ctx, cluster) }},
 		{"reconciling the monitor secret", func() error { return r.reconcileMonitorSecret(ctx, cluster) }},
+		{"reconciling the role secrets", func() (err error) {
+			roleSecretProblems, err = r.reconcileRoleSecrets(ctx, cluster)
+			return err
+		}},
 		{"reconciling patroni access", func() error { return r.reconcilePatroniAccess(ctx, cluster) }},
 		{"reconciling services", func() error { return r.reconcileServices(ctx, cluster) }},
 		{"reconciling pod disruption budget", func() error { return r.reconcilePodDisruptionBudget(ctx, cluster) }},
@@ -265,22 +283,26 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling the monitor role: %w", err)
 	}
+	rolesReady, err := r.reconcileRoles(ctx, cluster, roleSecretProblems)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling the application roles: %w", err)
+	}
 
 	log.Info("reconciled PostgresCluster", "instances", cluster.Spec.Instances, "version", cluster.Spec.Version, "image", image)
 	// Pod and Endpoints events trigger most re-observation, but replication
 	// lag and an expiring leader lock change without one, so keep looking:
 	// often while something is wrong, rarely when all is well.
-	return ctrl.Result{RequeueAfter: refreshDelay(rolling, synced, view.healthy, monitorReady)}, nil
+	return ctrl.Result{RequeueAfter: refreshDelay(rolling, synced, view.healthy, monitorReady, rolesReady)}, nil
 }
 
 // refreshDelay is how long to wait before looking at a cluster again: soon
 // while it is being rolled, often while something is not as it should be, and
 // rarely otherwise.
-func refreshDelay(rolling, synced, healthy, monitorReady bool) time.Duration {
+func refreshDelay(rolling, synced, healthy, monitorReady, rolesReady bool) time.Duration {
 	switch {
 	case rolling:
 		return rolloutRequeueDelay
-	case !synced || !healthy || !monitorReady:
+	case !synced || !healthy || !monitorReady || !rolesReady:
 		return unhealthyRefreshInterval
 	}
 	return healthyRefreshInterval

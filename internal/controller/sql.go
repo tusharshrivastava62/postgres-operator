@@ -53,6 +53,9 @@ type SQLSession interface {
 	Exec(ctx context.Context, sql string) error
 	// QueryBool runs a query that returns a single boolean.
 	QueryBool(ctx context.Context, sql string) (bool, error)
+	// QueryText runs a query that returns a single text value, such as a JSON
+	// document the query built, and returns it.
+	QueryText(ctx context.Context, sql string) (string, error)
 	Close(ctx context.Context)
 }
 
@@ -107,6 +110,12 @@ func (s *pgxSession) Exec(ctx context.Context, sql string) error {
 
 func (s *pgxSession) QueryBool(ctx context.Context, sql string) (bool, error) {
 	var answer bool
+	err := s.conn.QueryRow(ctx, sql, pgx.QueryExecModeSimpleProtocol).Scan(&answer)
+	return answer, err
+}
+
+func (s *pgxSession) QueryText(ctx context.Context, sql string) (string, error) {
+	var answer string
 	err := s.conn.QueryRow(ctx, sql, pgx.QueryExecModeSimpleProtocol).Scan(&answer)
 	return answer, err
 }

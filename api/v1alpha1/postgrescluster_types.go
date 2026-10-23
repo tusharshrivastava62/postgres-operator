@@ -81,6 +81,16 @@ type PostgresClusterSpec struct {
 	// +optional
 	Compliance *ComplianceSpec `json:"compliance,omitempty"`
 
+	// roles lists the database roles for applications that the operator
+	// creates and keeps, each with a generated password in a Secret. A role
+	// can own a database made for it. Removing a role from the list disables
+	// its login and ends its sessions; it is never dropped.
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=32
+	// +optional
+	Roles []RoleSpec `json:"roles,omitempty"`
+
 	// image overrides the container image used for the PostgreSQL pods. When
 	// unset, the operator picks its built-in image for spec.version. Either
 	// way, the image actually in use is recorded in status.image, and an
@@ -437,6 +447,47 @@ type PostgresClusterStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
+// RoleSpec is one database role for an application.
+//
+// Every role the operator makes can log in and nothing else: it is not a
+// superuser and cannot create roles or databases, replicate, or bypass row
+// security. What it owns is its own database, if it has one.
+type RoleSpec struct {
+	// name is the role's name in the database: lower-case letters, digits
+	// and underscores, starting with a letter. Names starting with pg_ or
+	// bg_, and the names PostgreSQL, Patroni and this operator use for their
+	// own roles, are refused.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9_]*$`
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// database names a database to create for the role to own. Everyone else
+	// is refused connection to it. A database that already exists is left
+	// alone, and is reported as an error unless this role owns it. Only one
+	// role can name a database.
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9_]*$`
+	// +optional
+	Database string `json:"database,omitempty"`
+
+	// connectionLimit is how many connections the role may hold at once.
+	// Leave it unset for no limit.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10000
+	// +optional
+	ConnectionLimit *int32 `json:"connectionLimit,omitempty"`
+
+	// secretName is the Secret the role's connection details are written to:
+	// username, password, host, port and, with a database, dbname. It
+	// defaults to <cluster>-role-<name>, with underscores written as hyphens.
+	// The Secret is not deleted with the cluster or with the role.
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	SecretName string `json:"secretName,omitempty"`
+}
+
 // Role states.
 const (
 	// RoleReady means the role exists, with the privileges the operator gave
@@ -447,7 +498,13 @@ const (
 	RolePending = "Pending"
 	// RoleError means the operator tried and could not.
 	RoleError = "Error"
+	// RoleDisabled means the role was made by the operator, is no longer in
+	// the spec, and can no longer log in. It has not been dropped.
+	RoleDisabled = "Disabled"
 )
+
+// ConditionRolesReady is true when every role in spec.roles is Ready.
+const ConditionRolesReady = "RolesReady"
 
 // AccessControlStatus is what the operator last observed about the database
 // roles it manages.
@@ -456,16 +513,26 @@ type AccessControlStatus struct {
 	// so that none of them holds the superuser password.
 	// +optional
 	MonitorRole RoleStatus `json:"monitorRole,omitzero"`
+
+	// roles is the state of each role in spec.roles, and of each role the
+	// operator made that has since been removed from it.
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=64
+	// +optional
+	Roles []RoleStatus `json:"roles,omitempty"`
 }
 
 // RoleStatus is the state of one role the operator manages.
 type RoleStatus struct {
 	// name is the role's name in the database.
-	// +optional
-	Name string `json:"name,omitempty"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
 
-	// state is Ready, Pending or Error.
-	// +kubebuilder:validation:Enum=Ready;Pending;Error
+	// state is Ready, Pending, Error or Disabled.
+	// +kubebuilder:validation:Enum=Ready;Pending;Error;Disabled
 	// +optional
 	State string `json:"state,omitempty"`
 

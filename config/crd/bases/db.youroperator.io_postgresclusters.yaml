@@ -672,6 +672,63 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
+              roles:
+                description: |-
+                  roles lists the database roles for applications that the operator
+                  creates and keeps, each with a generated password in a Secret. A role
+                  can own a database made for it. Removing a role from the list disables
+                  its login and ends its sessions; it is never dropped.
+                items:
+                  description: |-
+                    RoleSpec is one database role for an application.
+
+                    Every role the operator makes can log in and nothing else: it is not a
+                    superuser and cannot create roles or databases, replicate, or bypass row
+                    security. What it owns is its own database, if it has one.
+                  properties:
+                    connectionLimit:
+                      description: |-
+                        connectionLimit is how many connections the role may hold at once.
+                        Leave it unset for no limit.
+                      format: int32
+                      maximum: 10000
+                      minimum: 1
+                      type: integer
+                    database:
+                      description: |-
+                        database names a database to create for the role to own. Everyone else
+                        is refused connection to it. A database that already exists is left
+                        alone, and is reported as an error unless this role owns it. Only one
+                        role can name a database.
+                      maxLength: 63
+                      pattern: ^[a-z][a-z0-9_]*$
+                      type: string
+                    name:
+                      description: |-
+                        name is the role's name in the database: lower-case letters, digits
+                        and underscores, starting with a letter. Names starting with pg_ or
+                        bg_, and the names PostgreSQL, Patroni and this operator use for their
+                        own roles, are refused.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z][a-z0-9_]*$
+                      type: string
+                    secretName:
+                      description: |-
+                        secretName is the Secret the role's connection details are written to:
+                        username, password, host, port and, with a database, dbname. It
+                        defaults to <cluster>-role-<name>, with underscores written as hyphens.
+                        The Secret is not deleted with the cluster or with the role.
+                      maxLength: 253
+                      type: string
+                  required:
+                  - name
+                  type: object
+                maxItems: 32
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               storage:
                 description: storage configures the per-instance persistent volume.
                 properties:
@@ -739,19 +796,62 @@ spec:
                         type: string
                       name:
                         description: name is the role's name in the database.
+                        maxLength: 63
+                        minLength: 1
                         type: string
                       secretName:
                         description: secretName is the Secret holding the role's username
                           and password.
                         type: string
                       state:
-                        description: state is Ready, Pending or Error.
+                        description: state is Ready, Pending, Error or Disabled.
                         enum:
                         - Ready
                         - Pending
                         - Error
+                        - Disabled
                         type: string
+                    required:
+                    - name
                     type: object
+                  roles:
+                    description: |-
+                      roles is the state of each role in spec.roles, and of each role the
+                      operator made that has since been removed from it.
+                    items:
+                      description: RoleStatus is the state of one role the operator
+                        manages.
+                      properties:
+                        message:
+                          description: message says what is wrong when the state is
+                            not Ready.
+                          maxLength: 512
+                          type: string
+                        name:
+                          description: name is the role's name in the database.
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                        secretName:
+                          description: secretName is the Secret holding the role's
+                            username and password.
+                          type: string
+                        state:
+                          description: state is Ready, Pending, Error or Disabled.
+                          enum:
+                          - Ready
+                          - Pending
+                          - Error
+                          - Disabled
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    maxItems: 64
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
                 type: object
               backup:
                 description: backup reports what can be restored and how healthy backing

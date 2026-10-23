@@ -436,6 +436,121 @@ spec:
 		Expect(count).To(BeNumerically(">=", result.acknowledged))
 	})
 
+	It("keeps application roles: a login of their own, a database and a Secret, and nothing more", func() {
+		const (
+			ordersSecret    = clusterName + "-role-app-orders"
+			reportingSecret = clusterName + "-role-reporting"
+			tempSecret      = clusterName + "-role-temp-job"
+		)
+		patchRoles := func(roles string) {
+			_, err := inCluster("patch", "postgrescluster", clusterName, "--type=merge", "-p", `{"spec":{"roles":`+roles+`}}`)
+			ExpectWithOffset(1, err).NotTo(HaveOccurred())
+		}
+		const kept = `[{"name":"app_orders","database":"orders","connectionLimit":20},{"name":"reporting"}`
+
+		By("asking for two roles, one with a database of its own")
+		patchRoles(kept + `]`)
+		Eventually(func(g Gomega) {
+			g.Expect(conditionStatus("RolesReady")).To(Equal("True"))
+			for _, role := range []string{"app_orders", "reporting"} {
+				g.Expect(roleState(clusterName, role)).To(Equal("Ready"), role)
+			}
+		}, 3*time.Minute, pollEvery).Should(Succeed())
+		primary, err := clusterField(".status.primaryInstance")
+		Expect(err).NotTo(HaveOccurred())
+
+		By("logging in through the Service with the details in the Secret")
+		out, err := asRole(primary, clusterName, ordersSecret, "orders",
+			"create table orders_t (i int); insert into orders_t values (1), (2); select count(*) from orders_t")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(out).To(ContainSubstring("INSERT 0 2"))
+		Expect(strings.TrimSpace(out)).To(HaveSuffix("2"))
+		dbname, err := secretValue(ordersSecret, "dbname")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(dbname).To(Equal("orders"))
+		host, err := secretValue(ordersSecret, "host")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(host).To(Equal(clusterName + "." + clusterNamespace + ".svc"))
+
+		By("keeping the other role out of that database, and giving neither any power over the server")
+		out, err = asRole(primary, clusterName, reportingSecret, "orders", "select 1")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(out).To(ContainSubstring("permission denied for database"))
+		for _, statement := range []string{"create role evil", "create database evil", "alter role app_orders superuser"} {
+			out, err = asRole(primary, clusterName, ordersSecret, "orders", statement)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out).To(ContainSubstring("permission denied"), statement)
+		}
+		attributes, err := psql(primary, "", "select rolname, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls, "+
+			"rolcanlogin, rolconnlimit from pg_roles where rolname in ('app_orders', 'reporting') order by 1")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.Fields(attributes)).To(Equal([]string{"app_orders|f|f|f|f|f|t|20", "reporting|f|f|f|f|f|t|-1"}))
+
+		By("never writing a role's password in the server log, whatever sets it")
+		for _, secret := range []string{ordersSecret, reportingSecret} {
+			password, err := secretValue(secret, "password")
+			Expect(err).NotTo(HaveOccurred())
+			pods, err := inCluster("get", "pods", "-l", mainSelector+",app.kubernetes.io/component=postgres", "-o", "name")
+			Expect(err).NotTo(HaveOccurred())
+			for pod := range strings.FieldsSeq(pods) {
+				count, err := runInPod(strings.TrimPrefix(pod, "pod/"),
+					fmt.Sprintf(`cat /home/postgres/pgdata/pgroot/pg_log/*.csv | grep -c -F '%s' || true`, password))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(strings.TrimSpace(count)).To(Equal("0"), "%s in the log of %s", secret, pod)
+			}
+		}
+
+		By("putting right a password changed behind the operator's back")
+		original, err := secretValue(ordersSecret, "password")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = psql(primary, "", "alter role app_orders password 'changed-behind-its-back'")
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func(g Gomega) {
+			// The operator trusts what it found for a few minutes; a change to
+			// the Secret is what makes it look at once.
+			_, err := inCluster("annotate", "secret", ordersSecret, "--overwrite", "e2e/poke="+time.Now().Format(time.RFC3339Nano))
+			g.Expect(err).NotTo(HaveOccurred())
+			out, err := asRole(primary, clusterName, ordersSecret, "orders", "select count(*) from orders_t")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(strings.TrimSpace(out)).To(Equal("2"))
+		}, 3*time.Minute, pollEvery).Should(Succeed())
+		current, err := secretValue(ordersSecret, "password")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(current).To(Equal(original), "the Secret's password is the one the role has again")
+
+		By("disabling a role that is removed from the spec, and keeping it")
+		patchRoles(kept + `,{"name":"temp_job"}]`)
+		Eventually(func() (string, error) { return roleState(clusterName, "temp_job") }, 3*time.Minute, pollEvery).Should(Equal("Ready"))
+		out, err = asRole(primary, clusterName, tempSecret, "postgres", "select current_user")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.TrimSpace(out)).To(Equal("temp_job"))
+		patchRoles(kept + `]`)
+		Eventually(func() (string, error) { return roleState(clusterName, "temp_job") }, 3*time.Minute, pollEvery).Should(Equal("Disabled"))
+		out, err = asRole(primary, clusterName, tempSecret, "postgres", "select 1")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(out).To(ContainSubstring("is not permitted to log in"))
+		exists, err := psql(primary, "", "select rolcanlogin from pg_roles where rolname = 'temp_job'")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(exists).To(Equal("f"), "the role is kept, and cannot log in")
+		Expect(conditionStatus("RolesReady")).To(Equal("True"), "a disabled role is not one that is not ready")
+
+		By("reporting a role it did not make, and leaving it as it was")
+		_, err = psql(primary, "", "create role handmade login superuser")
+		Expect(err).NotTo(HaveOccurred())
+		patchRoles(kept + `,{"name":"handmade"}]`)
+		Eventually(func() (string, error) { return roleState(clusterName, "handmade") }, 3*time.Minute, pollEvery).Should(Equal("Error"))
+		message, err := clusterField(`.status.accessControl.roles[?(@.name=="handmade")].message`)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(message).To(ContainSubstring("was not made by this operator"))
+		super, err := psql(primary, "", "select rolsuper from pg_roles where rolname = 'handmade'")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(super).To(Equal("t"), "the role is not touched")
+		patchRoles(kept + `]`)
+		_, err = psql(primary, "", "drop role handmade")
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func() (string, error) { return conditionStatus("RolesReady") }, 3*time.Minute, pollEvery).Should(Equal("True"))
+	})
+
 	It("archives WAL and takes encrypted base backups to an object store, then keeps them across a failover", func() {
 		startObjectStore()
 		for name, data := range map[string][]string{
@@ -550,6 +665,14 @@ spec:
 			if target != "" {
 				targetLine = fmt.Sprintf("      targetTime: %q\n", target)
 			}
+			// The first restored cluster asks for one of the source's roles, not
+			// the other: the one it asks for gets a new password, and the one it
+			// does not is switched off. The others ask for none, and the roles
+			// they inherited are switched off too.
+			rolesBlock := ""
+			if name == restoredName {
+				rolesBlock = "  roles:\n  - name: app_orders\n    database: orders\n"
+			}
 			return fmt.Sprintf(`apiVersion: db.youroperator.io/v1alpha1
 kind: PostgresCluster
 metadata:
@@ -563,7 +686,7 @@ spec:
   resources:
     limits:
       memory: 1Gi
-  bootstrap:
+%[7]s  bootstrap:
     recovery:
       sourceCluster: %[3]s
       destination:
@@ -573,7 +696,7 @@ spec:
         credentialsSecret: backup-s3
       encryption:
         keySecret: backup-key
-%[6]s`, name, clusterNamespace, clusterName, backupBucket, objectStoreEndpoint, targetLine)
+%[6]s`, name, clusterNamespace, clusterName, backupBucket, objectStoreEndpoint, targetLine, rolesBlock)
 		}
 		waitAvailable := func(name string) {
 			Eventually(func(g Gomega) {
@@ -649,11 +772,46 @@ spec:
 			Expect(out).To(Equal("2"))
 		})
 
+		It("gives a role the source made a new password, and switches off the ones it was not asked to keep", func() {
+			Eventually(func() (string, error) { return roleState(restoredName, "app_orders") }, 5*time.Minute, pollEvery).Should(Equal("Ready"))
+			const sourceSecret, restoredSecret = clusterName + "-role-app-orders", restoredName + "-role-app-orders"
+			before, err := secretValue(sourceSecret, "password")
+			Expect(err).NotTo(HaveOccurred())
+			after, err := secretValue(restoredSecret, "password")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(after).NotTo(BeEmpty())
+			Expect(after).NotTo(Equal(before), "a restored cluster does not share the source's passwords")
+
+			By("finding the role's database and data, and logging in with the restored cluster's own password")
+			out, err := asRole(restoredName+"-0", restoredName, restoredSecret, "orders", "select count(*) from orders_t")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(strings.TrimSpace(out)).To(Equal("2"))
+
+			By("refusing the source's password, which the restored data also held")
+			out, err = asRole(restoredName+"-0", restoredName, sourceSecret, "orders", "select 1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out).To(ContainSubstring("password authentication failed"))
+
+			By("switching off the role it was not asked to keep")
+			Eventually(func() (string, error) { return roleState(restoredName, "reporting") }, 3*time.Minute, pollEvery).Should(Equal("Disabled"))
+			out, err = asRole(restoredName+"-0", restoredName, clusterName+"-role-reporting", "postgres", "select 1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out).To(ContainSubstring("is not permitted to log in"))
+		})
+
 		It("restores to the latest moment when no time is given", func() {
 			_, err := kubectlIn(restoreManifest(latestName, ""), "apply", "-f", "-")
 			Expect(err).NotTo(HaveOccurred())
 			waitAvailable(latestName)
 			Expect(rowsOf(latestName + "-0")).To(Equal([]string{rowBeforeBackup, rowBeforeTarget, rowAfterTarget}))
+
+			By("switching off the roles it inherited, though its spec lists none")
+			for _, role := range []string{"app_orders", "reporting"} {
+				Eventually(func() (string, error) { return roleState(latestName, role) }, 5*time.Minute, pollEvery).Should(Equal("Disabled"), role)
+				out, err := asRole(latestName+"-0", latestName, clusterName+"-role-"+strings.ReplaceAll(role, "_", "-"), "postgres", "select 1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(out).To(ContainSubstring("is not permitted to log in"), role)
+			}
 		})
 
 		It("says so in the conditions, and creates no pods, when the target is before the oldest backup", func() {

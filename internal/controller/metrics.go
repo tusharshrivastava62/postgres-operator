@@ -21,6 +21,7 @@ const (
 	labelResult    = "result"
 	labelInstance  = "instance"
 	labelStatus    = "status"
+	labelState     = "state"
 )
 
 // Custom, per-cluster metrics. These are registered on the same registry
@@ -96,6 +97,11 @@ var (
 		Help: "Number of compliance controls of a PostgresCluster in each status (Met, NotMet, Unknown), as of the last compliance check.",
 	}, []string{labelNamespace, labelName, labelStatus})
 
+	managedRoles = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "postgrescluster_roles",
+		Help: "Number of database roles the operator manages for a PostgresCluster in each state (Ready, Pending, Error, Disabled).",
+	}, []string{labelNamespace, labelName, labelState})
+
 	replicationLagBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "postgrescluster_replication_lag_bytes",
 		Help: "Bytes of WAL each streaming replica is behind the primary. A replica that is not streaming has no series.",
@@ -117,5 +123,6 @@ func init() {
 		restoreVerificationLastSuccess,
 		restoreVerificationDuration,
 		complianceControls,
+		managedRoles,
 	)
 }

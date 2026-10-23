@@ -436,3 +436,34 @@ func asMonitor(pod, host, sql string) (string, error) {
 	return runInPod(pod, fmt.Sprintf(`PGPASSWORD='%s' PGSSLMODE=require psql -X -At -h %s -U %s -d postgres -c "%s" 2>&1 || true`,
 		password, host, monitorRole, sql))
 }
+
+// secretValue reads one entry of a Secret in the cluster's namespace.
+func secretValue(secret, key string) (string, error) {
+	encoded, err := inCluster("get", "secret", secret, "-o", "jsonpath={.data."+key+"}")
+	if err != nil {
+		return "", err
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	return string(decoded), err
+}
+
+// asRole runs one statement on a database pod over TCP, through a cluster's
+// Service, as the application role whose details are in a Secret. A statement
+// the server refuses is not an error here: its answer is the output.
+func asRole(pod, cluster, secret, database, sql string) (string, error) {
+	user, err := secretValue(secret, "username")
+	if err != nil {
+		return "", err
+	}
+	password, err := secretValue(secret, "password")
+	if err != nil {
+		return "", err
+	}
+	return runInPod(pod, fmt.Sprintf(`PGPASSWORD='%s' PGSSLMODE=require psql -X -At -h %s -U %s -d %s -c "%s" 2>&1 || true`,
+		password, cluster, user, database, sql))
+}
+
+// roleState reads the state status gives a role of a cluster, or "" if it is not listed.
+func roleState(cluster, role string) (string, error) {
+	return clusterFieldOf(cluster, `.status.accessControl.roles[?(@.name=="`+role+`")].state`)
+}
