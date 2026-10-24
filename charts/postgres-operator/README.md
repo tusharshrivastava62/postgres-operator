@@ -1,9 +1,10 @@
 # postgres-operator
 
 A Helm chart for the postgres-operator Kubernetes operator: installs the
-`PostgresCluster` CRD, RBAC, the manager Deployment, and (since the
-validating webhook is always on in this project) the cert-manager
-`Issuer`/`Certificate` and `ValidatingWebhookConfiguration` it needs.
+`PostgresCluster` and `PostgresEmergencyAccess` CRDs, RBAC, the manager
+Deployment, and (since the webhooks are always on in this project) the
+cert-manager `Issuer`/`Certificate` and the `ValidatingWebhookConfiguration`
+and `MutatingWebhookConfiguration` they need.
 
 ## Prerequisites
 
@@ -32,6 +33,15 @@ lets the operator manage `networkpolicies`. If you replace the Deployment, keep 
 clusters with compliance settings will be held back with a message saying why. See
 [`docs/compliance.md`](../../docs/compliance.md).
 
+## Emergency access
+
+`PostgresEmergencyAccess` requests are stamped with the user who made them by a *mutating*
+webhook, which is what the record of who asked rests on: with `failurePolicy: Fail`, a request
+cannot be created while it is down, and the operator refuses to grant one that names nobody.
+The chart also installs admin, editor and viewer `ClusterRole`s for the resource; give create
+permission to the few people who should be able to ask. See
+[`docs/emergency-access.md`](../../docs/emergency-access.md), and read the warning at the top of it.
+
 ## The CRD lives in `crds/`, not `templates/` - on purpose
 
 Helm treats `crds/` specially: those manifests are applied once on
@@ -50,7 +60,7 @@ CRD's schema (e.g. a new `spec` field) isn't automatic. Apply it manually
 after `helm upgrade`:
 
 ```bash
-kubectl apply -f charts/postgres-operator/crds/postgrescluster-crd.yaml
+kubectl apply -f charts/postgres-operator/crds/
 ```
 
 If you regenerate this chart from `config/` via `kustomize build

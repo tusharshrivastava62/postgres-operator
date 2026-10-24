@@ -33,24 +33,24 @@ func specWithRoles(roles ...RoleSpec) *PostgresClusterSpec {
 
 func problemsFor(t *testing.T, spec *PostgresClusterSpec) string {
 	t.Helper()
-	return spec.ValidateRoles("orders").ToAggregate().Error()
+	return spec.ValidateAccessControl("orders").ToAggregate().Error()
 }
 
-func TestValidateRolesAcceptsOrdinaryRoles(t *testing.T) {
+func TestValidateAccessControlAcceptsOrdinaryRoles(t *testing.T) {
 	spec := specWithRoles(
 		RoleSpec{Name: "app_orders", Database: "orders"},
 		RoleSpec{Name: "reporting", SecretName: "reporting-db"},
 		RoleSpec{Name: "a"},
 	)
-	if errs := spec.ValidateRoles("orders"); len(errs) != 0 {
+	if errs := spec.ValidateAccessControl("orders"); len(errs) != 0 {
 		t.Fatalf("unexpected problems: %v", errs)
 	}
-	if errs := (&PostgresClusterSpec{}).ValidateRoles("orders"); len(errs) != 0 {
+	if errs := (&PostgresClusterSpec{}).ValidateAccessControl("orders"); len(errs) != 0 {
 		t.Fatalf("a spec with no roles has problems: %v", errs)
 	}
 }
 
-func TestValidateRolesRefusesNames(t *testing.T) {
+func TestValidateAccessControlRefusesNames(t *testing.T) {
 	long := "a" + strings.Repeat("b", 63)
 	tests := []struct{ name, role, want string }{
 		{"upper case", "App", nameRule},
@@ -78,24 +78,24 @@ func TestValidateRolesRefusesNames(t *testing.T) {
 	}
 }
 
-func TestValidateRolesAcceptsANameThatOnlyContainsAReservedOne(t *testing.T) {
+func TestValidateAccessControlAcceptsANameThatOnlyContainsAReservedOne(t *testing.T) {
 	// postgres_app and my_admin are not the reserved names, and pg and bg
 	// without the underscore are not the reserved prefixes.
 	for _, name := range []string{"postgres_app", "my_admin", "pgapp", "bgjob", "app_pg_"} {
-		if errs := specWithRoles(RoleSpec{Name: name}).ValidateRoles("orders"); len(errs) != 0 {
+		if errs := specWithRoles(RoleSpec{Name: name}).ValidateAccessControl("orders"); len(errs) != 0 {
 			t.Errorf("%s was refused: %v", name, errs)
 		}
 	}
 }
 
-func TestValidateRolesRefusesDuplicates(t *testing.T) {
+func TestValidateAccessControlRefusesDuplicates(t *testing.T) {
 	got := problemsFor(t, specWithRoles(RoleSpec{Name: appName}, RoleSpec{Name: appName, SecretName: "other"}))
 	if !strings.Contains(got, "spec.roles[1].name") || !strings.Contains(got, "also entry 0") {
 		t.Errorf("a repeated name was not refused at the second entry: %q", got)
 	}
 }
 
-func TestValidateRolesRefusesDatabases(t *testing.T) {
+func TestValidateAccessControlRefusesDatabases(t *testing.T) {
 	tests := []struct{ name, db, want string }{
 		{databasePostgres, databasePostgres, everyClusterHas},
 		{databaseTemplate0, databaseTemplate0, everyClusterHas},
@@ -126,7 +126,7 @@ func TestRoleSecretNameDefaultsAndHyphenates(t *testing.T) {
 	}
 }
 
-func TestValidateRolesRefusesSecretsThatAreTakenOrShared(t *testing.T) {
+func TestValidateAccessControlRefusesSecretsThatAreTakenOrShared(t *testing.T) {
 	backup := BackupSpec{
 		Enabled:     true,
 		Destination: &BackupDestination{Bucket: "b", CredentialsSecret: "backup-s3"},
@@ -150,7 +150,7 @@ func TestValidateRolesRefusesSecretsThatAreTakenOrShared(t *testing.T) {
 		t.Run(tt.secret, func(t *testing.T) {
 			spec := &PostgresClusterSpec{Backup: backup, Compliance: audit, Bootstrap: recovery,
 				Roles: []RoleSpec{{Name: appName, SecretName: tt.secret}}}
-			got := spec.ValidateRoles("orders").ToAggregate().Error()
+			got := spec.ValidateAccessControl("orders").ToAggregate().Error()
 			if !strings.Contains(got, "spec.roles[0].secretName") || !strings.Contains(got, tt.want) {
 				t.Errorf("problems = %q", got)
 			}
@@ -169,7 +169,7 @@ func TestValidateRolesRefusesSecretsThatAreTakenOrShared(t *testing.T) {
 	}
 }
 
-func TestValidateRolesRefusesASecretNameKubernetesWouldRefuse(t *testing.T) {
+func TestValidateAccessControlRefusesASecretNameKubernetesWouldRefuse(t *testing.T) {
 	for _, bad := range []string{"Has_Upper", "under_score", "-leading", strings.Repeat("a", 254)} {
 		got := problemsFor(t, specWithRoles(RoleSpec{Name: appName, SecretName: bad}))
 		if !strings.Contains(got, "spec.roles[0].secretName") {
@@ -178,9 +178,9 @@ func TestValidateRolesRefusesASecretNameKubernetesWouldRefuse(t *testing.T) {
 	}
 }
 
-func TestValidateRolesReportsEveryProblem(t *testing.T) {
+func TestValidateAccessControlReportsEveryProblem(t *testing.T) {
 	spec := specWithRoles(RoleSpec{Name: databasePostgres}, RoleSpec{Name: "BAD"}, RoleSpec{Name: "pg_x"})
-	if n := len(spec.ValidateRoles("orders")); n != 3 {
+	if n := len(spec.ValidateAccessControl("orders")); n != 3 {
 		t.Errorf("found %d problems, want 3", n)
 	}
 }
@@ -190,12 +190,12 @@ func hours(h int) *metav1.Duration { return &metav1.Duration{Duration: time.Dura
 func TestValidateRotationAcceptsADayOrMore(t *testing.T) {
 	spec := specWithRoles(RoleSpec{Name: appName, RotateEvery: hours(24)}, RoleSpec{Name: oneName, RotateEvery: hours(24 * 90)})
 	spec.CredentialRotation = &CredentialRotationSpec{SuperuserEvery: hours(24 * 30), MonitorEvery: hours(24)}
-	if errs := spec.ValidateRoles("orders"); len(errs) != 0 {
+	if errs := spec.ValidateAccessControl("orders"); len(errs) != 0 {
 		t.Fatalf("unexpected problems: %v", errs)
 	}
 	spec.CredentialRotation = &CredentialRotationSpec{}
 	spec.Roles = []RoleSpec{{Name: appName}}
-	if errs := spec.ValidateRoles("orders"); len(errs) != 0 {
+	if errs := spec.ValidateAccessControl("orders"); len(errs) != 0 {
 		t.Fatalf("no schedule at all has problems: %v", errs)
 	}
 }
@@ -215,7 +215,7 @@ func TestValidateRotationRefusesLessThanADay(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := tt.spec.ValidateRoles("orders").ToAggregate()
+			got := tt.spec.ValidateAccessControl("orders").ToAggregate()
 			if got == nil || !strings.Contains(got.Error(), tt.path) || !strings.Contains(got.Error(), "at least 24h") {
 				t.Errorf("problems = %v, want one at %s", got, tt.path)
 			}

@@ -202,6 +202,22 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	if err := (&controller.PostgresEmergencyAccessReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		SQL:      controller.NewPGXDialer(),
+		Recorder: mgr.GetEventRecorder("postgres-operator"),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "postgresemergencyaccess")
+		os.Exit(1)
+	}
+	// nolint:goconst
+	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
+		if err := webhookv1alpha1.SetupPostgresEmergencyAccessWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "Failed to create webhook", "webhook", "PostgresEmergencyAccess")
+			os.Exit(1)
+		}
+	}
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

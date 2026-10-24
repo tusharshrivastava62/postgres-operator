@@ -199,6 +199,12 @@ themselves access. Namespace permissions are outside what is checked.
 review of roles. The operator's jobs connect as the read-only role, and the passwords of that
 role and of the superuser are never rotated.
 
+**Emergency access, if you allow it.** A person who has escalated with emergency access
+(see [emergency-access.md](emergency-access.md)) is not recorded by pgaudit: their reads and writes
+are in the server log as `statement:` lines, which the shipper does carry to the bucket, but the
+`audit-logging` control, which checks pgaudit's settings, says nothing about them. And those lines
+include the values bound to a statement's parameters, in clear text, whatever `logParameters` says.
+
 **The cluster around it.** Kubernetes RBAC, who can read Secrets, node security, image
 provenance, and the host the cluster runs on.
 

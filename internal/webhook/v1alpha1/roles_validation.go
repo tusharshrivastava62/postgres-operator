@@ -23,7 +23,7 @@ import (
 // express. They live with the API types, so the controller checks the same
 // ones when the webhook is not there.
 func validateRoles(cluster *dbv1alpha1.PostgresCluster) field.ErrorList {
-	return cluster.Spec.ValidateRoles(cluster.Name)
+	return cluster.Spec.ValidateAccessControl(cluster.Name)
 }
 
 // roleWarnings says what a change to spec.roles will do that the person
@@ -71,4 +71,14 @@ func rotationWarnings(oldCluster, newCluster *dbv1alpha1.PostgresCluster) admiss
 		"spec.credentialRotation.superuserEvery: every %s the superuser and replication passwords are replaced, and every database pod "+
 			"with them, one at a time, replicas first and the primary after a switchover. Writes are refused for about two seconds each time.",
 		now.SuperuserEvery.Duration)}
+}
+
+// emergencyWarnings says what switching emergency access off does to a grant
+// that is active at the time.
+func emergencyWarnings(oldCluster, newCluster *dbv1alpha1.PostgresCluster) admission.Warnings {
+	if oldCluster == nil || !oldCluster.Spec.EmergencyAccess.Allowed() || newCluster.Spec.EmergencyAccess.Allowed() {
+		return nil
+	}
+	return admission.Warnings{"spec.emergencyAccess: switching emergency access off ends every grant that is active, " +
+		"at once, and takes the logins away from the people using them."}
 }

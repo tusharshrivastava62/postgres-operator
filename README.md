@@ -112,6 +112,15 @@ Apply that, and the operator's reconcile loop takes it from there.
   data and backup volumes and the credentials `Secret` (see below). The `Endpoints` and
   `ConfigMap`s Patroni writes are removed too, so a new cluster with the same name starts clean.
 
+## Emergency access
+
+A cluster can allow temporary superuser access for an emergency (`spec.emergencyAccess`). A person
+asks with a `PostgresEmergencyAccess`, which records who asked and why, and gets a login that
+ends by itself. **While escalated, every statement and the values bound to its parameters are
+written to the server log in clear text, whatever the audit settings say**, and pgaudit does not
+record an escalated session's reads and writes. Read [docs/emergency-access.md](docs/emergency-access.md)
+before using it.
+
 ## What a compliance preset is not
 
 Enabling `spec.compliance` does **not** make a cluster compliant with HIPAA, SOC 2, PCI DSS or any

@@ -566,6 +566,25 @@ spec:
                       writes. It starts only when every member is streaming. At least 24 hours.
                     type: string
                 type: object
+              emergencyAccess:
+                description: |-
+                  emergencyAccess lets people with permission to create
+                  PostgresEmergencyAccess resources ask for temporary superuser access to
+                  the cluster, for an emergency. Leave it unset to allow none.
+                properties:
+                  enabled:
+                    description: |-
+                      enabled lets people with permission to create PostgresEmergencyAccess
+                      resources ask for temporary superuser access to this cluster's
+                      databases. It is off unless set. Turning it off ends every grant that is
+                      active.
+                    type: boolean
+                  maxDuration:
+                    description: |-
+                      maxDuration is the longest one grant can last. It defaults to, and
+                      cannot exceed, eight hours.
+                    type: string
+                type: object
               ha:
                 default: {}
                 description: |-

@@ -79,6 +79,10 @@ type PostgresClusterReconciler struct {
 	// rolesVerified remembers, per cluster, when its application roles were
 	// last found in order, see reconcileRoles.
 	rolesVerified sync.Map
+
+	// emergencyVerified remembers, per cluster, when the roles left by
+	// emergency access were last swept, see reconcileEmergencyAccess.
+	emergencyVerified sync.Map
 }
 
 // +kubebuilder:rbac:groups=db.youroperator.io,resources=postgresclusters,verbs=get;list;watch;create;update;patch;delete
@@ -86,6 +90,7 @@ type PostgresClusterReconciler struct {
 // +kubebuilder:rbac:groups=db.youroperator.io,resources=postgresclusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=db.youroperator.io,resources=postgresemergencyaccesses,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
@@ -169,7 +174,7 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// The webhook refuses roles that clash with the system's own, or with each
 	// other's Secrets, but a webhook is not always there. Roles are made with
 	// the superuser, so a name that slipped through must not reach it.
-	if errs := cluster.Spec.ValidateRoles(cluster.Name); len(errs) > 0 {
+	if errs := cluster.Spec.ValidateAccessControl(cluster.Name); len(errs) > 0 {
 		message := errs.ToAggregate().Error()
 		log.Info("not reconciling: invalid spec.roles: " + message)
 		return ctrl.Result{}, r.markInvalidSpec(ctx, cluster, "InvalidRoles", message)
@@ -294,6 +299,9 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, fmt.Errorf("replacing the superuser and replication passwords: %w", err)
 	}
 	r.recordCredentialAges(ctx, cluster)
+	if err := r.reconcileEmergencyAccess(ctx, cluster); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling emergency access: %w", err)
+	}
 
 	log.Info("reconciled PostgresCluster", "instances", cluster.Spec.Instances, "version", cluster.Spec.Version, "image", image)
 	// Pod and Endpoints events trigger most re-observation, but replication

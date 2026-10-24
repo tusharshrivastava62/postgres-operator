@@ -27,3 +27,23 @@ webhooks:
     resources:
     - postgresclusters
   sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: '{{ include "postgres-operator.fullname" . }}-webhook-service'
+      namespace: '{{ .Release.Namespace }}'
+      path: /validate-db-youroperator-io-v1alpha1-postgresemergencyaccess
+  failurePolicy: Fail
+  name: vpostgresemergencyaccess-v1alpha1.kb.io
+  rules:
+  - apiGroups:
+    - db.youroperator.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - postgresemergencyaccesses
+  sideEffects: None

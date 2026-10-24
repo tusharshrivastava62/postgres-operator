@@ -41,12 +41,29 @@ var _ = Describe("The sample manifests", func() {
 			Expect(err).NotTo(HaveOccurred(), path)
 			cluster := &dbv1alpha1.PostgresCluster{}
 			Expect(yaml.UnmarshalStrict(raw, cluster)).To(Succeed(), path)
-			cluster.Namespace = "default"
+			cluster.Namespace = defaultNamespace
 
 			warnings, err := validator.ValidateCreate(ctx, cluster)
 			Expect(err).NotTo(HaveOccurred(), "%s: %v", path, err)
 			Expect(warnings).To(BeEmpty(), "%s: a sample should not warn", path)
 		}
+	})
+
+	It("include a request for emergency access that the cluster sample would grant", func() {
+		raw, err := os.ReadFile(filepath.Join(dir, "db_v1alpha1_postgresemergencyaccess.yaml")) //nolint:gosec // the repository's own sample
+		Expect(err).NotTo(HaveOccurred())
+		request := &dbv1alpha1.PostgresEmergencyAccess{}
+		Expect(yaml.UnmarshalStrict(raw, request)).To(Succeed())
+
+		clusterRaw, err := os.ReadFile(filepath.Join(dir, "db_v1alpha1_postgrescluster_compliance.yaml")) //nolint:gosec // the repository's own sample
+		Expect(err).NotTo(HaveOccurred())
+		cluster := &dbv1alpha1.PostgresCluster{}
+		Expect(yaml.UnmarshalStrict(clusterRaw, cluster)).To(Succeed())
+
+		Expect(request.Spec.ClusterRef.Name).To(Equal(cluster.Name), "the request names a cluster in the samples")
+		Expect(cluster.Spec.EmergencyAccess.Allowed()).To(BeTrue(), "and that cluster allows it")
+		Expect(request.Spec.Validate(cluster.Spec.EmergencyAccess.MaxAllowed())).To(BeEmpty())
+		Expect(string(raw)).To(ContainSubstring("clear text"), "and the sample carries the warning")
 	})
 
 	It("have names of their own, so applying them all together does not collide", func() {

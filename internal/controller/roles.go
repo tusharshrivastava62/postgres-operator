@@ -626,8 +626,14 @@ func (r *PostgresClusterReconciler) allSpecRoles(cluster *dbv1alpha1.PostgresClu
 
 // superuserTarget is how to connect to the primary as the superuser.
 func (r *PostgresClusterReconciler) superuserTarget(ctx context.Context, cluster *dbv1alpha1.PostgresCluster, address string) (SQLTarget, error) {
+	return superuserTargetOf(ctx, r.Client, cluster, address)
+}
+
+// superuserTargetOf is superuserTarget for anything that can read the
+// cluster's Secrets.
+func superuserTargetOf(ctx context.Context, reader client.Reader, cluster *dbv1alpha1.PostgresCluster, address string) (SQLTarget, error) {
 	creds := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: credentialsSecretName(cluster)}, creds); err != nil {
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: credentialsSecretName(cluster)}, creds); err != nil {
 		return SQLTarget{}, fmt.Errorf("reading the superuser credentials: %w", err)
 	}
 	return SQLTarget{

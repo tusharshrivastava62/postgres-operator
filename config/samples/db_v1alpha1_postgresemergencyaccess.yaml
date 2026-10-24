@@ -1,0 +1,18 @@
+# Temporary superuser access to a cluster, for an emergency. The cluster must allow it
+# (spec.emergencyAccess.enabled; see db_v1alpha1_postgrescluster_compliance.yaml).
+#
+# WARNING: while you are escalated, every statement you run is written to the server log, and so
+# are the values you bind to its parameters, in clear text, whatever the audit settings say. Read
+# docs/emergency-access.md before you run your first statement.
+apiVersion: db.youroperator.io/v1alpha1
+kind: PostgresEmergencyAccess
+metadata:
+  labels:
+    app.kubernetes.io/name: postgres-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: orders-out-of-connections
+spec:
+  clusterRef:
+    name: postgrescluster-compliance-sample
+  duration: 30m   # default 1h; between 1m and the cluster's maxDuration
+  reason: orders database is out of connections and the application is down

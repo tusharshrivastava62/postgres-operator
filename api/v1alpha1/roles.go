@@ -68,15 +68,17 @@ func validateRotateEvery(path *field.Path, every *metav1.Duration) *field.Error 
 	return nil
 }
 
-// ValidateRoles holds the rules for spec.roles and spec.credentialRotation
+// ValidateAccessControl holds the rules for spec.roles, spec.credentialRotation and
+// spec.emergencyAccess
 // that the CRD schema cannot express: which names are taken, and which are
 // shared, and how often a password may change. The webhook refuses a spec that
 // breaks them, and the controller checks again, since a webhook is not always
 // there.
-func (s *PostgresClusterSpec) ValidateRoles(cluster string) field.ErrorList {
+func (s *PostgresClusterSpec) ValidateAccessControl(cluster string) field.ErrorList {
 	var errs field.ErrorList
 	path := field.NewPath("spec", "roles")
 
+	errs = append(errs, s.EmergencyAccess.Validate(field.NewPath("spec", "emergencyAccess"))...)
 	if rotation := s.CredentialRotation; rotation != nil {
 		rotationPath := field.NewPath("spec", "credentialRotation")
 		if err := validateRotateEvery(rotationPath.Child("superuserEvery"), rotation.SuperuserEvery); err != nil {

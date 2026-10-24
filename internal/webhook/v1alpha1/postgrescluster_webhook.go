@@ -73,7 +73,8 @@ func (v *PostgresClusterCustomValidator) ValidateCreate(_ context.Context, obj *
 	errs = append(errs, validateRoles(obj)...)
 	warnings := append(warningsFor(obj), backupWarnings(nil, obj)...)
 	warnings = append(warnings, complianceWarnings(nil, obj)...)
-	return append(warnings, roleWarnings(nil, obj)...), invalidError(obj, errs)
+	warnings = append(warnings, roleWarnings(nil, obj)...)
+	return append(warnings, emergencyWarnings(nil, obj)...), invalidError(obj, errs)
 }
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type PostgresCluster.
@@ -93,7 +94,8 @@ func (v *PostgresClusterCustomValidator) ValidateUpdate(_ context.Context, oldOb
 	errs = append(errs, validateRoles(newObj)...)
 	warnings := append(warningsFor(newObj), backupWarnings(oldObj, newObj)...)
 	warnings = append(warnings, complianceWarnings(oldObj, newObj)...)
-	return append(warnings, roleWarnings(oldObj, newObj)...), invalidError(newObj, errs)
+	warnings = append(warnings, roleWarnings(oldObj, newObj)...)
+	return append(warnings, emergencyWarnings(oldObj, newObj)...), invalidError(newObj, errs)
 }
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type PostgresCluster.

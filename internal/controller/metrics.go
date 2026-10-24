@@ -98,6 +98,11 @@ var (
 		Help: "Number of compliance controls of a PostgresCluster in each status (Met, NotMet, Unknown), as of the last compliance check.",
 	}, []string{labelNamespace, labelName, labelStatus})
 
+	emergencyAccessActive = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "postgrescluster_emergency_access_active",
+		Help: "Number of emergency access grants of a PostgresCluster that are active now.",
+	}, []string{labelNamespace, labelName})
+
 	credentialAge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "postgrescluster_credential_age_seconds",
 		Help: "Seconds since a kind of credential of a PostgresCluster was last replaced, or first set: superuser, replication, monitor, or, for the oldest of its roles, application.",
@@ -131,5 +136,6 @@ func init() {
 		complianceControls,
 		managedRoles,
 		credentialAge,
+		emergencyAccessActive,
 	)
 }

@@ -106,6 +106,9 @@ var _ = BeforeSuite(func() {
 	err = SetupPostgresClusterWebhookWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
+	err = SetupPostgresEmergencyAccessWebhookWithManager(mgr)
+	Expect(err).NotTo(HaveOccurred())
+
 	// +kubebuilder:scaffold:webhook
 
 	go func() {

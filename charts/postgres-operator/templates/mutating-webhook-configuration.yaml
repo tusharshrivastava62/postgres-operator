@@ -1,0 +1,28 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: {{ include "postgres-operator.fullname" . }}-mutating-webhook-configuration
+  annotations:
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "postgres-operator.fullname" . }}-serving-cert
+  labels:
+  {{- include "postgres-operator.labels" . | nindent 4 }}
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: '{{ include "postgres-operator.fullname" . }}-webhook-service'
+      namespace: '{{ .Release.Namespace }}'
+      path: /mutate-db-youroperator-io-v1alpha1-postgresemergencyaccess
+  failurePolicy: Fail
+  name: mpostgresemergencyaccess-v1alpha1.kb.io
+  rules:
+  - apiGroups:
+    - db.youroperator.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    resources:
+    - postgresemergencyaccesses
+  sideEffects: None

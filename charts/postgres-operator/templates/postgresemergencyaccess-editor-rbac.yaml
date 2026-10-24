@@ -1,0 +1,25 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "postgres-operator.fullname" . }}-postgresemergencyaccess-editor-role
+  labels:
+  {{- include "postgres-operator.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - db.youroperator.io
+  resources:
+  - postgresemergencyaccesses
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - db.youroperator.io
+  resources:
+  - postgresemergencyaccesses/status
+  verbs:
+  - get

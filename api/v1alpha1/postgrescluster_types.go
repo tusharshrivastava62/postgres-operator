@@ -99,6 +99,12 @@ type PostgresClusterSpec struct {
 	// +optional
 	CredentialRotation *CredentialRotationSpec `json:"credentialRotation,omitempty"`
 
+	// emergencyAccess lets people with permission to create
+	// PostgresEmergencyAccess resources ask for temporary superuser access to
+	// the cluster, for an emergency. Leave it unset to allow none.
+	// +optional
+	EmergencyAccess *EmergencyAccessSpec `json:"emergencyAccess,omitempty"`
+
 	// image overrides the container image used for the PostgreSQL pods. When
 	// unset, the operator picks its built-in image for spec.version. Either
 	// way, the image actually in use is recorded in status.image, and an

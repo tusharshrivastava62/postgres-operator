@@ -70,6 +70,7 @@ rules:
   - db.youroperator.io
   resources:
   - postgresclusters
+  - postgresemergencyaccesses
   verbs:
   - create
   - delete
@@ -82,16 +83,25 @@ rules:
   - db.youroperator.io
   resources:
   - postgresclusters/finalizers
+  - postgresemergencyaccesses/finalizers
   verbs:
   - update
 - apiGroups:
   - db.youroperator.io
   resources:
   - postgresclusters/status
+  - postgresemergencyaccesses/status
   verbs:
   - get
   - patch
   - update
+- apiGroups:
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
 - apiGroups:
   - networking.k8s.io
   resources:

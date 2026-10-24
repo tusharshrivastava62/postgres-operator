@@ -64,3 +64,6 @@ spec:
       logParameters: false   # leave off: it writes bound parameter values in clear text
     network:
       allowFrom: []          # more peers that may connect, besides pods labelled as clients
+  emergencyAccess:
+    enabled: true        # lets people with permission ask for temporary superuser access; see docs/emergency-access.md
+    maxDuration: 2h      # the longest one request may ask for; at most 8h

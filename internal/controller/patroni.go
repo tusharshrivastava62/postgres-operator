@@ -229,10 +229,16 @@ func sameValue(want, got any) bool {
 // address is empty, without an error, while there is no leader to talk to: as
 // during creation or a failover, or when the leader's pod has no address yet.
 func (r *PostgresClusterReconciler) leaderAddress(ctx context.Context, cluster *dbv1alpha1.PostgresCluster) (name, address string, err error) {
+	return leaderAddressOf(ctx, r.Client, cluster)
+}
+
+// leaderAddressOf is leaderAddress for anything that can read the cluster's
+// objects, so a controller other than the cluster's can find the primary too.
+func leaderAddressOf(ctx context.Context, reader client.Reader, cluster *dbv1alpha1.PostgresCluster) (name, address string, err error) {
 	// Core Endpoints are deprecated in Kubernetes, but they are where Patroni
 	// keeps the leader record, so they are what has to be read.
 	endpoints := &corev1.Endpoints{} //nolint:staticcheck // Patroni's Kubernetes DCS stores the leader on Endpoints
-	err = r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: cluster.Name}, endpoints)
+	err = reader.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: cluster.Name}, endpoints)
 	if apierrors.IsNotFound(err) {
 		return "", "", nil
 	}
@@ -245,7 +251,7 @@ func (r *PostgresClusterReconciler) leaderAddress(ctx context.Context, cluster *
 	}
 
 	pod := &corev1.Pod{}
-	err = r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: name}, pod)
+	err = reader.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: name}, pod)
 	if apierrors.IsNotFound(err) {
 		return "", "", nil
 	}

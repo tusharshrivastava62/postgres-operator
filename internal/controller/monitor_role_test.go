@@ -66,6 +66,14 @@ type fakeSQL struct {
 	// make the fake database change the way a real one would.
 	afterExec func(statement string)
 
+	// textFor, if set, answers a query for text instead of observed; boolFor
+	// answers a query for a boolean instead of monitorPrivileged.
+	textFor func(database, sql string) string
+	boolFor func(database, sql string) bool
+
+	// ran is every statement, with the database it ran in, in order.
+	ran []ranStatement
+
 	dials    []SQLTarget
 	executed []string
 	queries  []string
@@ -93,7 +101,7 @@ func (f *fakeSQL) Dial(_ context.Context, target SQLTarget) (SQLSession, error) 
 	default:
 		return nil, &pgconn.PgError{Code: sqlStateInvalidAuthorization, Message: "role does not exist"}
 	}
-	return &fakeSession{db: f, user: target.User, password: target.Password}, nil
+	return &fakeSession{db: f, user: target.User, password: target.Password, database: target.Database}, nil
 }
 
 func (f *fakeSQL) usersDialed() []string {
@@ -106,10 +114,13 @@ func (f *fakeSQL) usersDialed() []string {
 	return users
 }
 
+type ranStatement struct{ database, sql string }
+
 type fakeSession struct {
 	db       *fakeSQL
 	user     string
 	password string
+	database string
 }
 
 var verifierInSQL = regexp.MustCompile(`SCRAM-SHA-256\$(\d+):([A-Za-z0-9+/=]+)\$[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+`)
@@ -121,6 +132,7 @@ func (s *fakeSession) Exec(_ context.Context, sql string) error {
 		return &pgconn.PgError{Code: "42501", Message: "permission denied"}
 	}
 	s.db.executed = append(s.db.executed, sql)
+	s.db.ran = append(s.db.ran, ranStatement{s.database, sql})
 	if s.db.execFailure != nil {
 		if err := s.db.execFailure(sql); err != nil {
 			return err
@@ -156,6 +168,9 @@ func (s *fakeSession) QueryBool(_ context.Context, sql string) (bool, error) {
 	s.db.mu.Lock()
 	defer s.db.mu.Unlock()
 	s.db.queries = append(s.db.queries, s.user)
+	if s.db.boolFor != nil {
+		return s.db.boolFor(s.database, sql), nil
+	}
 	return s.db.monitorPrivileged, nil
 }
 
@@ -164,6 +179,9 @@ func (s *fakeSession) QueryText(_ context.Context, sql string) (string, error) {
 	defer s.db.mu.Unlock()
 	s.db.queries = append(s.db.queries, s.user)
 	s.db.queried = append(s.db.queried, sql)
+	if s.db.textFor != nil {
+		return s.db.textFor(s.database, sql), nil
+	}
 	return s.db.observed, nil
 }
 

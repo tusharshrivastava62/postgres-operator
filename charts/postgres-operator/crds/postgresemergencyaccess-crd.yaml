@@ -1,0 +1,151 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: postgresemergencyaccesses.db.youroperator.io
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  # Files under crds/ are applied verbatim by Helm - no templating engine
+  # runs over them - so these labels are static rather than built from
+  # postgres-operator.labels like every other resource in this chart.
+  labels:
+    app.kubernetes.io/name: postgres-operator
+    app.kubernetes.io/managed-by: Helm
+spec:
+  group: db.youroperator.io
+  names:
+    kind: PostgresEmergencyAccess
+    listKind: PostgresEmergencyAccessList
+    plural: postgresemergencyaccesses
+    singular: postgresemergencyaccess
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.clusterRef.name
+      name: Cluster
+      type: string
+    - jsonPath: .status.state
+      name: State
+      type: string
+    - jsonPath: .status.requestedBy
+      name: Requested by
+      type: string
+    - jsonPath: .status.expiresAt
+      name: Expires
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          PostgresEmergencyAccess is a request for temporary superuser access to a
+          cluster's databases, for an emergency. It is granted for as long as the
+          request says, is audited, and ends by itself.
+
+          WARNING: while escalated, every statement is written to the server log, and
+          so are the values bound to its parameters, in clear text.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec is the request.
+            properties:
+              clusterRef:
+                description: |-
+                  clusterRef is the cluster to get access to. It must be in this
+                  namespace, and have spec.emergencyAccess.enabled set.
+                properties:
+                  name:
+                    description: name is the PostgresCluster to get access to.
+                    maxLength: 63
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              duration:
+                default: 1h
+                description: |-
+                  duration is how long the access lasts, from the moment it is granted. It
+                  defaults to one hour, and cannot be longer than the cluster's
+                  spec.emergencyAccess.maxDuration, which is at most eight hours.
+                type: string
+              reason:
+                description: |-
+                  reason says why access is needed. It is kept with the request, and is
+                  what someone reading the audit trail afterwards has to go on.
+
+                  WARNING: while you are escalated, every statement you run is written to
+                  the server log, and so are the values you bind to its parameters, in
+                  clear text, whatever the cluster's audit settings say. Do not run a
+                  statement whose values must not be logged.
+                maxLength: 500
+                minLength: 10
+                type: string
+            required:
+            - clusterRef
+            - reason
+            type: object
+          status:
+            description: status is the state of the request.
+            properties:
+              endedAt:
+                description: endedAt is when the access was taken away.
+                format: date-time
+                type: string
+              expiresAt:
+                description: expiresAt is when the access ends.
+                format: date-time
+                type: string
+              message:
+                description: message says what the state means, and what to do next.
+                maxLength: 1024
+                type: string
+              requestedBy:
+                description: requestedBy is who created the request, as the API server
+                  knew them.
+                type: string
+              role:
+                description: role is the database role to log in as.
+                type: string
+              secretName:
+                description: |-
+                  secretName is the Secret holding the role's login details. It is deleted
+                  when the access ends.
+                type: string
+              startedAt:
+                description: startedAt is when the access was granted.
+                format: date-time
+                type: string
+              state:
+                description: state is Pending, Active, Expired, Revoked, Denied or
+                  Failed.
+                enum:
+                - Pending
+                - Active
+                - Expired
+                - Revoked
+                - Denied
+                - Failed
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

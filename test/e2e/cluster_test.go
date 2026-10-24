@@ -1427,6 +1427,9 @@ c.delete_bucket_lifecycle(Bucket=os.environ["AUDIT_BUCKET"])
 			And(ContainSubstring(`"tidy-up"`), ContainSubstring("30 days")))
 		Expect(onShipper(removeRule)).To(Succeed())
 
+		By("granting temporary superuser access for an emergency, recording it, and taking it away")
+		emergencyAccessScenario(primary)
+
 		By("swapping one standard for another by reloading, without replacing a pod")
 		during := podUIDs()
 		patchCompliance(`{"spec":{"compliance":{"standard":"soc2"}}}`)
