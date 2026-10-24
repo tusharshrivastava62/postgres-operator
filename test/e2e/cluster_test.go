@@ -494,7 +494,7 @@ spec:
 			Expect(err).NotTo(HaveOccurred())
 			for pod := range strings.FieldsSeq(pods) {
 				count, err := runInPod(strings.TrimPrefix(pod, "pod/"),
-					fmt.Sprintf(`cat /home/postgres/pgdata/pgroot/pg_log/*.csv | grep -c -F '%s' || true`, password))
+					fmt.Sprintf(`cat /home/postgres/pgdata/pgroot/pg_log/*.csv | grep -c -F -e '%s' || true`, password))
 				Expect(err).NotTo(HaveOccurred())
 				Expect(strings.TrimSpace(count)).To(Equal("0"), "%s in the log of %s", secret, pod)
 			}
@@ -663,7 +663,7 @@ spec:
 		for pod := range strings.FieldsSeq(pods) {
 			for _, password := range []string{newSuperuser, newReplication} {
 				count, err := runInPod(strings.TrimPrefix(pod, "pod/"),
-					fmt.Sprintf(`cat /home/postgres/pgdata/pgroot/pg_log/*.csv | grep -c -F '%s' || true`, password))
+					fmt.Sprintf(`cat /home/postgres/pgdata/pgroot/pg_log/*.csv | grep -c -F -e '%s' || true`, password))
 				Expect(err).NotTo(HaveOccurred())
 				Expect(strings.TrimSpace(count)).To(Equal("0"), "a new password in the log of %s", pod)
 			}
