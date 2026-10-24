@@ -518,6 +518,30 @@ spec:
 		Expect(err).NotTo(HaveOccurred())
 		Expect(current).To(Equal(original), "the Secret's password is the one the role has again")
 
+		By("replacing a role's password when asked: the database first, then the Secret, and the old one stops working")
+		beforeRotation, err := secretValue(ordersSecret, "password")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = inCluster("annotate", "secret", ordersSecret, "--overwrite", "db.youroperator.io/rotate=e2e-1")
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func(g Gomega) {
+			now, err := secretValue(ordersSecret, "password")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(now).NotTo(Equal(beforeRotation))
+		}, 3*time.Minute, pollEvery).Should(Succeed())
+		out, err = asRole(primary, clusterName, ordersSecret, "orders", "select count(*) from orders_t")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.TrimSpace(out)).To(Equal("2"), "the new password works, and the data is there")
+		out, err = runInPod(primary, fmt.Sprintf(`PGPASSWORD='%s' PGSSLMODE=require psql -X -At -h %s -U app_orders -d orders -c "select 1" 2>&1 || true`,
+			beforeRotation, clusterName))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(out).To(ContainSubstring("password authentication failed"), "the old one does not")
+		rotatedAt, err := clusterField(`.status.accessControl.roles[?(@.name=="app_orders")].lastRotated`)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rotatedAt).NotTo(BeEmpty())
+		answered, err := inCluster("get", "secret", ordersSecret, "-o", `jsonpath={.metadata.annotations.db\.youroperator\.io/rotated-token}`)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(answered).To(Equal("e2e-1"), "the request is answered, so it is not answered again")
+
 		By("disabling a role that is removed from the spec, and keeping it")
 		patchRoles(kept + `,{"name":"temp_job"}]`)
 		Eventually(func() (string, error) { return roleState(clusterName, "temp_job") }, 3*time.Minute, pollEvery).Should(Equal("Ready"))
@@ -549,6 +573,114 @@ spec:
 		_, err = psql(primary, "", "drop role handmade")
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(func() (string, error) { return conditionStatus("RolesReady") }, 3*time.Minute, pollEvery).Should(Equal("True"))
+	})
+
+	It("replaces the superuser and replication passwords, and every pod with them, while an application keeps writing", func() {
+		const ordersSecret = clusterName + "-role-app-orders"
+		podUIDs := func() []string {
+			out, err := inCluster("get", "pods", "-l", mainSelector+",app.kubernetes.io/component=postgres",
+				"-o", "jsonpath={range .items[*]}{.metadata.uid} {end}")
+			ExpectWithOffset(1, err).NotTo(HaveOccurred())
+			fields := strings.Fields(out)
+			slices.Sort(fields)
+			return fields
+		}
+		image, err := clusterField(".status.image")
+		Expect(err).NotTo(HaveOccurred())
+		primary, err := clusterField(".status.primaryInstance")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = asRole(primary, clusterName, ordersSecret, "orders", "create table if not exists rotation_rows (i int)")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = kubectlIn(roleWriterManifest(image, ordersSecret, "orders", "rotation_rows"), "apply", "-f", "-")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _, _ = inCluster("delete", "pod", "role-writer", "--wait=false") })
+		Eventually(func(g Gomega) {
+			log, err := inCluster("logs", "role-writer")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(parseWriterLog(log).acknowledged).To(BeNumerically(">=", 20))
+		}, 3*time.Minute, pollEvery).Should(Succeed())
+
+		oldSuperuser, err := secretValue(clusterName+"-credentials", "password")
+		Expect(err).NotTo(HaveOccurred())
+		oldReplication, err := secretValue(clusterName+"-credentials", "replication-password")
+		Expect(err).NotTo(HaveOccurred())
+		before := podUIDs()
+		Expect(before).To(HaveLen(instances))
+
+		By("asking for the passwords to be replaced")
+		_, err = inCluster("annotate", "secret", clusterName+"-credentials", "--overwrite", "db.youroperator.io/rotate=e2e-1")
+		Expect(err).NotTo(HaveOccurred())
+
+		By("replacing every pod, so each starts with the new passwords, and ending with a healthy cluster")
+		Eventually(func(g Gomega) {
+			now := podUIDs()
+			g.Expect(now).To(HaveLen(instances))
+			for _, uid := range before {
+				g.Expect(now).NotTo(ContainElement(uid), "every pod was replaced")
+			}
+			expectHealthy(g)
+			state, err := clusterField(".status.accessControl.credentials.state")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(state).To(Equal("Idle"))
+		}, clusterUpTimeout+10*time.Minute, pollEvery).Should(Succeed())
+
+		By("leaving the Secret with the new passwords only, and a record of it")
+		newSuperuser, err := secretValue(clusterName+"-credentials", "password")
+		Expect(err).NotTo(HaveOccurred())
+		newReplication, err := secretValue(clusterName+"-credentials", "replication-password")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(newSuperuser).NotTo(Equal(oldSuperuser))
+		Expect(newReplication).NotTo(Equal(oldReplication))
+		keys, err := inCluster("get", "secret", clusterName+"-credentials", "-o", "jsonpath={.data}")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(keys).NotTo(ContainSubstring("password-next"), "the waiting passwords are the passwords now")
+		version, err := inCluster("get", "secret", clusterName+"-credentials", "-o",
+			`jsonpath={.metadata.annotations.db\.youroperator\.io/credentials-version}`)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(version).To(Equal("1"))
+		rotated, err := clusterField(".status.accessControl.credentials.lastRotated")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rotated).NotTo(BeEmpty())
+
+		By("accepting the new superuser password and refusing the old one")
+		newPrimary, err := clusterField(".status.primaryInstance")
+		Expect(err).NotTo(HaveOccurred())
+		login := func(password string) string {
+			out, err := runInPod(newPrimary, fmt.Sprintf(
+				`PGPASSWORD='%s' PGSSLMODE=require psql -X -At -h %s -U postgres -d postgres -c "select 'in'" 2>&1 || true`, password, clusterName))
+			ExpectWithOffset(1, err).NotTo(HaveOccurred())
+			return out
+		}
+		Expect(strings.TrimSpace(login(newSuperuser))).To(Equal("in"))
+		Expect(login(oldSuperuser)).To(ContainSubstring("password authentication failed"))
+
+		By("streaming with the new replication password: a replica that started with another would never be ready")
+		Expect(conditionStatus("ReplicationHealthy")).To(Equal("True"))
+
+		By("never writing either password in a server log")
+		pods, err := inCluster("get", "pods", "-l", mainSelector+",app.kubernetes.io/component=postgres", "-o", "name")
+		Expect(err).NotTo(HaveOccurred())
+		for pod := range strings.FieldsSeq(pods) {
+			for _, password := range []string{newSuperuser, newReplication} {
+				count, err := runInPod(strings.TrimPrefix(pod, "pod/"),
+					fmt.Sprintf(`cat /home/postgres/pgdata/pgroot/pg_log/*.csv | grep -c -F '%s' || true`, password))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(strings.TrimSpace(count)).To(Equal("0"), "a new password in the log of %s", pod)
+			}
+		}
+
+		By("checking what the application saw")
+		log, err := inCluster("logs", "role-writer")
+		Expect(err).NotTo(HaveOccurred())
+		result := parseWriterLog(log)
+		AddReportEntry("password rotation as seen by a writer",
+			fmt.Sprintf("%d acknowledged, %d failed, longest gap %s", result.acknowledged, result.failed, result.longestGap))
+		Expect(result.longestGap).To(BeNumerically("<", 15*time.Second), "one switchover, as in any rolling update")
+		stored, err := asRole(newPrimary, clusterName, ordersSecret, "orders", "select count(*) from rotation_rows")
+		Expect(err).NotTo(HaveOccurred())
+		count, err := strconv.Atoi(strings.TrimSpace(stored))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(count).To(BeNumerically(">=", result.acknowledged), "every acknowledged write is there")
 	})
 
 	It("archives WAL and takes encrypted base backups to an object store, then keeps them across a failover", func() {
@@ -1165,12 +1297,33 @@ print(append_extensions('bg_mon,pg_stat_statements,pgextwlist,pg_auth_mon,set_us
 		}
 		primaryIP, err := inCluster("get", "pod", primary, "-o", "jsonpath={.status.podIP}")
 		Expect(err).NotTo(HaveOccurred())
+
+		By("replacing the monitor role's password when asked, which the jobs pick up on their next run")
+		oldMonitor, err := secretValue(clusterName+"-monitor", "password")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = inCluster("annotate", "secret", clusterName+"-monitor", "--overwrite", "db.youroperator.io/rotate=e2e-1")
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func(g Gomega) {
+			now, err := secretValue(clusterName+"-monitor", "password")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(now).NotTo(Equal(oldMonitor))
+			g.Expect(clusterField(".status.accessControl.monitorRole.state")).To(Equal("Ready"))
+			g.Expect(clusterField(".status.accessControl.monitorRole.lastRotated")).NotTo(BeEmpty())
+		}, 5*time.Minute, pollEvery).Should(Succeed())
+		out, err := asMonitor(primary, primaryIP, "select pgoperator.non_scram_roles()")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.TrimSpace(out)).To(Equal("0"), "the new password works")
+		out, err = runInPod(primary, fmt.Sprintf(`PGPASSWORD='%s' PGSSLMODE=require psql -X -At -h %s -U %s -d postgres -c "select 1" 2>&1 || true`,
+			oldMonitor, primaryIP, monitorRole))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(out).To(ContainSubstring("password authentication failed"), "the old one does not")
+
 		for _, probe := range []string{"select * from pg_authid", "select pg_read_file('/etc/passwd')", "select set_user_u('postgres')"} {
 			out, err := asMonitor(primary, primaryIP, probe)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(out).To(ContainSubstring("permission denied"), probe)
 		}
-		out, err := asMonitor(primary, primaryIP, "select pgoperator.non_scram_roles()")
+		out, err = asMonitor(primary, primaryIP, "select pgoperator.non_scram_roles()")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(strings.TrimSpace(out)).To(Equal("0"), "the one thing it may ask of the password table")
 		service := clusterName + "." + clusterNamespace + ".svc.cluster.local"

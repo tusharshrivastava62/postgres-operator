@@ -50,6 +50,9 @@ type fakeSQL struct {
 	// monitorPassword is what the database holds for the monitor role; empty
 	// means the role does not exist.
 	monitorPassword string
+	// monitorVerifier is the verifier the last setup statement set, which a
+	// login is checked against when the password is not one the test knows.
+	monitorVerifier string
 	// monitorPrivileged is whether the role has everything the verify query asks.
 	monitorPrivileged bool
 	// unreachable, when set, is what every Dial fails with: the network is down.
@@ -59,6 +62,9 @@ type fakeSQL struct {
 	// returns an error for a statement, is what running that statement does.
 	observed    string
 	execFailure func(statement string) error
+	// afterExec, if set, is told of each statement that ran, so a test can
+	// make the fake database change the way a real one would.
+	afterExec func(statement string)
 
 	dials    []SQLTarget
 	executed []string
@@ -75,7 +81,9 @@ func (f *fakeSQL) Dial(_ context.Context, target SQLTarget) (SQLSession, error) 
 	}
 	switch target.User {
 	case monitorRoleName:
-		if f.monitorPassword == "" || target.Password != f.monitorPassword {
+		matchesPassword := f.monitorPassword != "" && target.Password == f.monitorPassword
+		matchesVerifier := f.monitorVerifier != "" && verifierMatches(f.monitorVerifier, target.Password)
+		if !matchesPassword && !matchesVerifier {
 			return nil, &pgconn.PgError{Code: sqlStateInvalidPassword, Message: "password authentication failed"}
 		}
 	case testSuperuserName:
@@ -118,9 +126,13 @@ func (s *fakeSession) Exec(_ context.Context, sql string) error {
 			return err
 		}
 	}
+	if s.db.afterExec != nil {
+		defer s.db.afterExec(sql)
+	}
 	if m := verifierInSQL.FindString(sql); m != "" {
 		// Believe the password only if the statement is the verifier of it.
 		s.db.monitorPassword = s.db.passwordHashedBy(m)
+		s.db.monitorVerifier = m
 		s.db.monitorPrivileged = true
 	}
 	return nil
@@ -482,18 +494,32 @@ var _ = Describe("The monitor role", func() {
 	})
 
 	Describe("how soon the cluster is looked at again", func() {
+		well := refreshInputs{synced: true, healthy: true, monitorReady: true, rolesReady: true}
 		It("is slowly only when everything is well", func() {
-			Expect(refreshDelay(false, true, true, true, true)).To(Equal(healthyRefreshInterval))
+			Expect(refreshDelay(well)).To(Equal(healthyRefreshInterval))
 		})
 		It("is quickly when any one thing is not", func() {
-			Expect(refreshDelay(false, false, true, true, true)).To(Equal(unhealthyRefreshInterval), "Patroni's configuration not synced")
-			Expect(refreshDelay(false, true, false, true, true)).To(Equal(unhealthyRefreshInterval), "the cluster is unhealthy")
-			Expect(refreshDelay(false, true, true, false, true)).To(Equal(unhealthyRefreshInterval), "the monitor role is not ready")
-			Expect(refreshDelay(false, true, true, true, false)).To(Equal(unhealthyRefreshInterval), "an application role is not ready")
+			in := well
+			in.synced = false
+			Expect(refreshDelay(in)).To(Equal(unhealthyRefreshInterval), "Patroni's configuration not synced")
+			in = well
+			in.healthy = false
+			Expect(refreshDelay(in)).To(Equal(unhealthyRefreshInterval), "the cluster is unhealthy")
+			in = well
+			in.monitorReady = false
+			Expect(refreshDelay(in)).To(Equal(unhealthyRefreshInterval), "the monitor role is not ready")
+			in = well
+			in.rolesReady = false
+			Expect(refreshDelay(in)).To(Equal(unhealthyRefreshInterval), "an application role is not ready")
+			in = well
+			in.rotatingCredentials = true
+			Expect(refreshDelay(in)).To(Equal(unhealthyRefreshInterval), "the superuser and replication passwords are being replaced")
 		})
 		It("is soonest during a rolling update", func() {
-			Expect(refreshDelay(true, true, true, true, true)).To(Equal(rolloutRequeueDelay))
-			Expect(refreshDelay(true, false, false, false, false)).To(Equal(rolloutRequeueDelay))
+			in := well
+			in.rolling = true
+			Expect(refreshDelay(in)).To(Equal(rolloutRequeueDelay))
+			Expect(refreshDelay(refreshInputs{rolling: true})).To(Equal(rolloutRequeueDelay))
 		})
 	})
 

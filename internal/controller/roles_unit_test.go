@@ -23,6 +23,8 @@ const (
 	appRole         = "app"
 	appOrdersRole   = "app_orders"
 	keptRole        = "kept"
+	firstRole       = "first"
+	secondRole      = "second"
 	passwordClause  = "password 'SCRAM"
 	passwordWord    = "password"
 	testClusterName = "orders"

@@ -91,6 +91,14 @@ type PostgresClusterSpec struct {
 	// +optional
 	Roles []RoleSpec `json:"roles,omitempty"`
 
+	// credentialRotation says how often the operator's own database
+	// credentials are replaced. Leave it unset to replace them only when asked,
+	// by annotating the Secret that holds them with db.youroperator.io/rotate
+	// and any value not used before. The passwords of the roles in spec.roles
+	// are set one by one, with rotateEvery.
+	// +optional
+	CredentialRotation *CredentialRotationSpec `json:"credentialRotation,omitempty"`
+
 	// image overrides the container image used for the PostgreSQL pods. When
 	// unset, the operator picks its built-in image for spec.version. Either
 	// way, the image actually in use is recorded in status.image, and an
@@ -479,6 +487,14 @@ type RoleSpec struct {
 	// +optional
 	ConnectionLimit *int32 `json:"connectionLimit,omitempty"`
 
+	// rotateEvery replaces the role's password this often: a new one is
+	// generated, set in the database, and written to the Secret. Open
+	// connections are not affected, but new ones made with the old password
+	// are refused until the application has read the Secret again. At least 24
+	// hours. Leave it unset to replace the password only when asked.
+	// +optional
+	RotateEvery *metav1.Duration `json:"rotateEvery,omitempty"`
+
 	// secretName is the Secret the role's connection details are written to:
 	// username, password, host, port and, with a database, dbname. It
 	// defaults to <cluster>-role-<name>, with underscores written as hyphens.
@@ -486,6 +502,22 @@ type RoleSpec struct {
 	// +kubebuilder:validation:MaxLength=253
 	// +optional
 	SecretName string `json:"secretName,omitempty"`
+}
+
+// CredentialRotationSpec is how often the operator's own credentials change.
+type CredentialRotationSpec struct {
+	// superuserEvery replaces the superuser's password and the replication
+	// password, together. Every database pod is replaced, one at a time, to
+	// pick up the new ones, replicas first, with a switchover before the
+	// primary: the cost of a rolling update, about two seconds of refused
+	// writes. It starts only when every member is streaming. At least 24 hours.
+	// +optional
+	SuperuserEvery *metav1.Duration `json:"superuserEvery,omitempty"`
+
+	// monitorEvery replaces the password of the read-only role the operator's
+	// own jobs connect as. Nothing else is affected. At least 24 hours.
+	// +optional
+	MonitorEvery *metav1.Duration `json:"monitorEvery,omitempty"`
 }
 
 // Role states.
@@ -514,6 +546,10 @@ type AccessControlStatus struct {
 	// +optional
 	MonitorRole RoleStatus `json:"monitorRole,omitzero"`
 
+	// credentials is the state of the superuser and replication passwords.
+	// +optional
+	Credentials CredentialsStatus `json:"credentials,omitzero"`
+
 	// roles is the state of each role in spec.roles, and of each role the
 	// operator made that has since been removed from it.
 	// +listType=map
@@ -521,6 +557,40 @@ type AccessControlStatus struct {
 	// +kubebuilder:validation:MaxItems=64
 	// +optional
 	Roles []RoleStatus `json:"roles,omitempty"`
+}
+
+// Credential rotation states.
+const (
+	// CredentialsIdle means no rotation is under way or due.
+	CredentialsIdle = "Idle"
+	// CredentialsWaiting means one is due, and is held back until the cluster
+	// is healthy and not being updated.
+	CredentialsWaiting = "Waiting"
+	// CredentialsRotating means the new passwords are being set.
+	CredentialsRotating = "Rotating"
+	// CredentialsRolling means the new passwords are set, and the pods are
+	// being replaced so that they start with them.
+	CredentialsRolling = "Rolling"
+	// CredentialsError means a rotation could not be carried out.
+	CredentialsError = "Error"
+)
+
+// CredentialsStatus is the state of the superuser and replication passwords.
+type CredentialsStatus struct {
+	// state is Idle, Waiting, Rotating, Rolling or Error.
+	// +kubebuilder:validation:Enum=Idle;Waiting;Rotating;Rolling;Error
+	// +optional
+	State string `json:"state,omitempty"`
+
+	// message says what a rotation is waiting for, or what went wrong.
+	// +kubebuilder:validation:MaxLength=512
+	// +optional
+	Message string `json:"message,omitempty"`
+
+	// lastRotated is when the passwords were last replaced by the operator,
+	// or when they were first set.
+	// +optional
+	LastRotated *metav1.Time `json:"lastRotated,omitempty"`
 }
 
 // RoleStatus is the state of one role the operator manages.
@@ -539,6 +609,11 @@ type RoleStatus struct {
 	// secretName is the Secret holding the role's username and password.
 	// +optional
 	SecretName string `json:"secretName,omitempty"`
+
+	// lastRotated is when the role's password was last replaced by the
+	// operator, or when it was first set.
+	// +optional
+	LastRotated *metav1.Time `json:"lastRotated,omitempty"`
 
 	// message says what is wrong when the state is not Ready.
 	// +kubebuilder:validation:MaxLength=512

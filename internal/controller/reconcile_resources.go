@@ -173,7 +173,11 @@ func (r *PostgresClusterReconciler) reconcileStatefulSet(ctx context.Context, cl
 	if err := r.reconcileAuditScripts(ctx, cluster); err != nil {
 		return fmt.Errorf("reconciling the audit shipper script: %w", err)
 	}
-	desired, err := desiredStatefulSet(cluster, image)
+	creds := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: credentialsSecretName(cluster)}, creds); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	desired, err := desiredStatefulSetAt(cluster, image, credentialsVersion(creds))
 	if err != nil {
 		return err
 	}

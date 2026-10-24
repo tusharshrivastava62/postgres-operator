@@ -287,22 +287,40 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling the application roles: %w", err)
 	}
+	// Last of the three: after the superuser's password is replaced, the first
+	// two must see the new one, and they will on the next look.
+	rotatingCredentials, err := r.reconcileCredentialRotation(ctx, cluster, view.healthy, rolling)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("replacing the superuser and replication passwords: %w", err)
+	}
+	r.recordCredentialAges(ctx, cluster)
 
 	log.Info("reconciled PostgresCluster", "instances", cluster.Spec.Instances, "version", cluster.Spec.Version, "image", image)
 	// Pod and Endpoints events trigger most re-observation, but replication
 	// lag and an expiring leader lock change without one, so keep looking:
 	// often while something is wrong, rarely when all is well.
-	return ctrl.Result{RequeueAfter: refreshDelay(rolling, synced, view.healthy, monitorReady, rolesReady)}, nil
+	return ctrl.Result{RequeueAfter: refreshDelay(refreshInputs{
+		rolling: rolling, synced: synced, healthy: view.healthy,
+		monitorReady: monitorReady, rolesReady: rolesReady, rotatingCredentials: rotatingCredentials,
+	})}, nil
+}
+
+// refreshInputs is what decides how soon a cluster is looked at again.
+type refreshInputs struct {
+	rolling, synced, healthy, monitorReady, rolesReady bool
+	// rotatingCredentials is whether the superuser and replication passwords
+	// are being replaced, or are due and waiting to be.
+	rotatingCredentials bool
 }
 
 // refreshDelay is how long to wait before looking at a cluster again: soon
 // while it is being rolled, often while something is not as it should be, and
 // rarely otherwise.
-func refreshDelay(rolling, synced, healthy, monitorReady, rolesReady bool) time.Duration {
+func refreshDelay(in refreshInputs) time.Duration {
 	switch {
-	case rolling:
+	case in.rolling:
 		return rolloutRequeueDelay
-	case !synced || !healthy || !monitorReady || !rolesReady:
+	case !in.synced || !in.healthy || !in.monitorReady || !in.rolesReady || in.rotatingCredentials:
 		return unhealthyRefreshInterval
 	}
 	return healthyRefreshInterval

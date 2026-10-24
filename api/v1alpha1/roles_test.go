@@ -13,6 +13,9 @@ package v1alpha1
 import (
 	"strings"
 	"testing"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
@@ -179,5 +182,43 @@ func TestValidateRolesReportsEveryProblem(t *testing.T) {
 	spec := specWithRoles(RoleSpec{Name: databasePostgres}, RoleSpec{Name: "BAD"}, RoleSpec{Name: "pg_x"})
 	if n := len(spec.ValidateRoles("orders")); n != 3 {
 		t.Errorf("found %d problems, want 3", n)
+	}
+}
+
+func hours(h int) *metav1.Duration { return &metav1.Duration{Duration: time.Duration(h) * time.Hour} }
+
+func TestValidateRotationAcceptsADayOrMore(t *testing.T) {
+	spec := specWithRoles(RoleSpec{Name: appName, RotateEvery: hours(24)}, RoleSpec{Name: oneName, RotateEvery: hours(24 * 90)})
+	spec.CredentialRotation = &CredentialRotationSpec{SuperuserEvery: hours(24 * 30), MonitorEvery: hours(24)}
+	if errs := spec.ValidateRoles("orders"); len(errs) != 0 {
+		t.Fatalf("unexpected problems: %v", errs)
+	}
+	spec.CredentialRotation = &CredentialRotationSpec{}
+	spec.Roles = []RoleSpec{{Name: appName}}
+	if errs := spec.ValidateRoles("orders"); len(errs) != 0 {
+		t.Fatalf("no schedule at all has problems: %v", errs)
+	}
+}
+
+func TestValidateRotationRefusesLessThanADay(t *testing.T) {
+	tooShort := &metav1.Duration{Duration: 23*time.Hour + 59*time.Minute}
+	tests := []struct {
+		name string
+		spec *PostgresClusterSpec
+		path string
+	}{
+		{"a role", &PostgresClusterSpec{Roles: []RoleSpec{{Name: appName, RotateEvery: tooShort}}}, "spec.roles[0].rotateEvery"},
+		{"the superuser", &PostgresClusterSpec{CredentialRotation: &CredentialRotationSpec{SuperuserEvery: tooShort}}, "spec.credentialRotation.superuserEvery"},
+		{"the monitor", &PostgresClusterSpec{CredentialRotation: &CredentialRotationSpec{MonitorEvery: tooShort}}, "spec.credentialRotation.monitorEvery"},
+		{"zero", &PostgresClusterSpec{CredentialRotation: &CredentialRotationSpec{MonitorEvery: &metav1.Duration{}}}, "spec.credentialRotation.monitorEvery"},
+		{"negative", &PostgresClusterSpec{Roles: []RoleSpec{{Name: appName, RotateEvery: hours(-24)}}}, "spec.roles[0].rotateEvery"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.spec.ValidateRoles("orders").ToAggregate()
+			if got == nil || !strings.Contains(got.Error(), tt.path) || !strings.Contains(got.Error(), "at least 24h") {
+				t.Errorf("problems = %v, want one at %s", got, tt.path)
+			}
+		})
 	}
 }

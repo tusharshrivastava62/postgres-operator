@@ -22,6 +22,7 @@ const (
 	labelInstance  = "instance"
 	labelStatus    = "status"
 	labelState     = "state"
+	labelKind      = "kind"
 )
 
 // Custom, per-cluster metrics. These are registered on the same registry
@@ -97,6 +98,11 @@ var (
 		Help: "Number of compliance controls of a PostgresCluster in each status (Met, NotMet, Unknown), as of the last compliance check.",
 	}, []string{labelNamespace, labelName, labelStatus})
 
+	credentialAge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "postgrescluster_credential_age_seconds",
+		Help: "Seconds since a kind of credential of a PostgresCluster was last replaced, or first set: superuser, replication, monitor, or, for the oldest of its roles, application.",
+	}, []string{labelNamespace, labelName, labelKind})
+
 	managedRoles = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "postgrescluster_roles",
 		Help: "Number of database roles the operator manages for a PostgresCluster in each state (Ready, Pending, Error, Disabled).",
@@ -124,5 +130,6 @@ func init() {
 		restoreVerificationDuration,
 		complianceControls,
 		managedRoles,
+		credentialAge,
 	)
 }

@@ -230,6 +230,8 @@ var _ = Describe("Application roles through the reconciler", func() {
 			Expect(sql.executed[4]).To(Equal(`revoke connect on database "appdb" from public`))
 
 			status := roleStatus("rs-up", appRole)
+			Expect(status.LastRotated).NotTo(BeNil(), "a password that was just set has been rotated just now")
+			status.LastRotated = nil
 			Expect(status).To(Equal(dbv1alpha1.RoleStatus{Name: appRole, State: dbv1alpha1.RoleReady, SecretName: "rs-up-role-app"}))
 			condition := rolesCondition("rs-up")
 			Expect(condition.Status).To(Equal(metav1.ConditionTrue))
@@ -272,7 +274,7 @@ var _ = Describe("Application roles through the reconciler", func() {
 			reconcileOnce("rs-spec")
 			dials := len(sql.dials)
 			update("rs-spec", func(c *dbv1alpha1.PostgresCluster) {
-				c.Spec.Roles = append(c.Spec.Roles, dbv1alpha1.RoleSpec{Name: "second"})
+				c.Spec.Roles = append(c.Spec.Roles, dbv1alpha1.RoleSpec{Name: secondRole})
 			})
 			reconcileOnce("rs-spec")
 			Expect(len(sql.dials)).To(BeNumerically(">", dials))

@@ -432,6 +432,7 @@ func (r *PostgresClusterReconciler) forgetMetrics(key client.ObjectKey) {
 	restoreVerificationDuration.DeletePartialMatch(match)
 	complianceControls.DeletePartialMatch(match)
 	managedRoles.DeletePartialMatch(match)
+	credentialAge.DeletePartialMatch(match)
 	r.rolesVerified.Delete(key.String())
 	r.lastPrimary.Delete(key.Namespace + "/" + key.Name)
 }

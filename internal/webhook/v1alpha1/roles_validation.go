@@ -29,14 +29,14 @@ func validateRoles(cluster *dbv1alpha1.PostgresCluster) field.ErrorList {
 // roleWarnings says what a change to spec.roles will do that the person
 // making it may not expect. Nothing here is refused.
 func roleWarnings(oldCluster, newCluster *dbv1alpha1.PostgresCluster) admission.Warnings {
+	warnings := rotationWarnings(oldCluster, newCluster)
 	if oldCluster == nil {
-		return nil
+		return warnings
 	}
 	now := map[string]dbv1alpha1.RoleSpec{}
 	for _, role := range newCluster.Spec.Roles {
 		now[role.Name] = role
 	}
-	var warnings admission.Warnings
 	for _, before := range oldCluster.Spec.Roles {
 		after, kept := now[before.Name]
 		switch {
@@ -51,4 +51,24 @@ func roleWarnings(oldCluster, newCluster *dbv1alpha1.PostgresCluster) admission.
 		}
 	}
 	return warnings
+}
+
+// rotationWarnings says what a schedule for the superuser's password costs. It
+// is the only one that does anything beyond the database: each time it runs,
+// every pod is replaced.
+func rotationWarnings(oldCluster, newCluster *dbv1alpha1.PostgresCluster) admission.Warnings {
+	now := newCluster.Spec.CredentialRotation
+	if now == nil || now.SuperuserEvery == nil {
+		return nil
+	}
+	if oldCluster != nil {
+		if before := oldCluster.Spec.CredentialRotation; before != nil && before.SuperuserEvery != nil &&
+			before.SuperuserEvery.Duration == now.SuperuserEvery.Duration {
+			return nil
+		}
+	}
+	return admission.Warnings{fmt.Sprintf(
+		"spec.credentialRotation.superuserEvery: every %s the superuser and replication passwords are replaced, and every database pod "+
+			"with them, one at a time, replicas first and the primary after a switchover. Writes are refused for about two seconds each time.",
+		now.SuperuserEvery.Duration)}
 }

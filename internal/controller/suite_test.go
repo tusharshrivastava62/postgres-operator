@@ -65,6 +65,11 @@ var _ = BeforeSuite(func() {
 		ErrorIfCRDPathMissing: true,
 	}
 
+	// Every reconciled cluster takes two ClusterIPs, and nothing in envtest
+	// deletes a Service, so the default range (a /24) runs out after a hundred
+	// or so specs. A /16 does not.
+	testEnv.ControlPlane.GetAPIServer().Configure().Set("service-cluster-ip-range", "10.0.0.0/16")
+
 	// Retrieve the first found binary directory to allow running tests from IDEs
 	if getFirstFoundEnvTestBinaryDir() != "" {
 		testEnv.BinaryAssetsDirectory = getFirstFoundEnvTestBinaryDir()

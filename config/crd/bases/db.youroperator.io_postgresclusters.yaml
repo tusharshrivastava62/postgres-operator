@@ -544,6 +544,28 @@ spec:
                 required:
                 - standard
                 type: object
+              credentialRotation:
+                description: |-
+                  credentialRotation says how often the operator's own database
+                  credentials are replaced. Leave it unset to replace them only when asked,
+                  by annotating the Secret that holds them with db.youroperator.io/rotate
+                  and any value not used before. The passwords of the roles in spec.roles
+                  are set one by one, with rotateEvery.
+                properties:
+                  monitorEvery:
+                    description: |-
+                      monitorEvery replaces the password of the read-only role the operator's
+                      own jobs connect as. Nothing else is affected. At least 24 hours.
+                    type: string
+                  superuserEvery:
+                    description: |-
+                      superuserEvery replaces the superuser's password and the replication
+                      password, together. Every database pod is replaced, one at a time, to
+                      pick up the new ones, replicas first, with a switchover before the
+                      primary: the cost of a rolling update, about two seconds of refused
+                      writes. It starts only when every member is streaming. At least 24 hours.
+                    type: string
+                type: object
               ha:
                 default: {}
                 description: |-
@@ -713,6 +735,14 @@ spec:
                       minLength: 1
                       pattern: ^[a-z][a-z0-9_]*$
                       type: string
+                    rotateEvery:
+                      description: |-
+                        rotateEvery replaces the role's password this often: a new one is
+                        generated, set in the database, and written to the Secret. Open
+                        connections are not affected, but new ones made with the old password
+                        are refused until the application has read the Secret again. At least 24
+                        hours. Leave it unset to replace the password only when asked.
+                      type: string
                     secretName:
                       description: |-
                         secretName is the Secret the role's connection details are written to:
@@ -784,11 +814,43 @@ spec:
                 description: accessControl reports the database roles the operator
                   manages.
                 properties:
+                  credentials:
+                    description: credentials is the state of the superuser and replication
+                      passwords.
+                    properties:
+                      lastRotated:
+                        description: |-
+                          lastRotated is when the passwords were last replaced by the operator,
+                          or when they were first set.
+                        format: date-time
+                        type: string
+                      message:
+                        description: message says what a rotation is waiting for,
+                          or what went wrong.
+                        maxLength: 512
+                        type: string
+                      state:
+                        description: state is Idle, Waiting, Rotating, Rolling or
+                          Error.
+                        enum:
+                        - Idle
+                        - Waiting
+                        - Rotating
+                        - Rolling
+                        - Error
+                        type: string
+                    type: object
                   monitorRole:
                     description: |-
                       monitorRole is the read-only role the operator's own jobs connect as,
                       so that none of them holds the superuser password.
                     properties:
+                      lastRotated:
+                        description: |-
+                          lastRotated is when the role's password was last replaced by the
+                          operator, or when it was first set.
+                        format: date-time
+                        type: string
                       message:
                         description: message says what is wrong when the state is
                           not Ready.
@@ -822,6 +884,12 @@ spec:
                       description: RoleStatus is the state of one role the operator
                         manages.
                       properties:
+                        lastRotated:
+                          description: |-
+                            lastRotated is when the role's password was last replaced by the
+                            operator, or when it was first set.
+                          format: date-time
+                          type: string
                         message:
                           description: message says what is wrong when the state is
                             not Ready.

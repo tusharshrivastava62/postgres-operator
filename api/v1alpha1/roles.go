@@ -14,7 +14,9 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
@@ -54,13 +56,36 @@ func (r *RoleSpec) RoleSecretName(cluster string) string {
 	return cluster + "-role-" + strings.ReplaceAll(r.Name, "_", "-")
 }
 
-// ValidateRoles holds the rules for spec.roles that the CRD schema cannot
-// express: which names are taken, and which are shared. The webhook refuses a
-// spec that breaks them, and the controller checks again, since a webhook is
-// not always there.
+// MinRotateEvery is the shortest time between replacing a password. A password
+// that changes more often than an application can be restarted is one the
+// application never has.
+const MinRotateEvery = 24 * time.Hour
+
+func validateRotateEvery(path *field.Path, every *metav1.Duration) *field.Error {
+	if every != nil && every.Duration < MinRotateEvery {
+		return field.Invalid(path, every.Duration.String(), "must be at least 24h: an application needs time to pick up a new password")
+	}
+	return nil
+}
+
+// ValidateRoles holds the rules for spec.roles and spec.credentialRotation
+// that the CRD schema cannot express: which names are taken, and which are
+// shared, and how often a password may change. The webhook refuses a spec that
+// breaks them, and the controller checks again, since a webhook is not always
+// there.
 func (s *PostgresClusterSpec) ValidateRoles(cluster string) field.ErrorList {
 	var errs field.ErrorList
 	path := field.NewPath("spec", "roles")
+
+	if rotation := s.CredentialRotation; rotation != nil {
+		rotationPath := field.NewPath("spec", "credentialRotation")
+		if err := validateRotateEvery(rotationPath.Child("superuserEvery"), rotation.SuperuserEvery); err != nil {
+			errs = append(errs, err)
+		}
+		if err := validateRotateEvery(rotationPath.Child("monitorEvery"), rotation.MonitorEvery); err != nil {
+			errs = append(errs, err)
+		}
+	}
 
 	// The Secrets the operator makes, and the ones the spec asks it to read.
 	// A role's Secret must not be any of them.
@@ -79,6 +104,9 @@ func (s *PostgresClusterSpec) ValidateRoles(cluster string) field.ErrorList {
 		role := &s.Roles[i]
 		at := path.Index(i)
 
+		if err := validateRotateEvery(at.Child("rotateEvery"), role.RotateEvery); err != nil {
+			errs = append(errs, err)
+		}
 		errs = append(errs, validateRoleName(at.Child("name"), role.Name)...)
 		if first, dup := names[role.Name]; dup {
 			errs = append(errs, field.Duplicate(at.Child("name"), fmt.Sprintf("%s (also entry %d)", role.Name, first)))

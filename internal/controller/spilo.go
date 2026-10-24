@@ -155,14 +155,19 @@ func sharedMemoryLimit(cluster *dbv1alpha1.PostgresCluster) *resource.Quantity {
 	return resource.NewQuantity(limit, resource.BinarySI)
 }
 
-// desiredStatefulSet builds the full StatefulSet for a cluster, including
-// the storage-backed volume claim template. Only used on first create; see
-// reconcileStatefulSet for why updates go through a narrower path.
+// desiredStatefulSetAt builds the full StatefulSet for a cluster, including
+// the storage-backed volume claim template, for a given credentials version:
+// the number of times the superuser and replication passwords have been
+// replaced. The pods read those passwords from their environment when they
+// start, so the version is on the pod template, and raising it is what makes
+// the rolling update that gives every pod the new ones. A cluster whose
+// passwords never have been replaced has none, and its template is as it
+// always was.
 //
 // Every pod runs the same single Spilo container and elects its role through
 // Patroni, even for instances: 1, so scaling from one instance to three is
 // the same code path as creating three.
-func desiredStatefulSet(cluster *dbv1alpha1.PostgresCluster, image string) (*appsv1.StatefulSet, error) {
+func desiredStatefulSetAt(cluster *dbv1alpha1.PostgresCluster, image, credentialsVersion string) (*appsv1.StatefulSet, error) {
 	env, err := spiloEnv(cluster)
 	if err != nil {
 		return nil, err
@@ -190,7 +195,7 @@ func desiredStatefulSet(cluster *dbv1alpha1.PostgresCluster, image string) (*app
 			// only after a switchover; see rollout.go.
 			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{Type: appsv1.OnDeleteStatefulSetStrategyType},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: selector},
+				ObjectMeta: metav1.ObjectMeta{Labels: selector, Annotations: credentialsVersionAnnotation(credentialsVersion)},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: patroniAccountName(cluster),
 					// Time for Patroni to demote and hand over leadership
@@ -278,4 +283,11 @@ func desiredStatefulSet(cluster *dbv1alpha1.PostgresCluster, image string) (*app
 		pod.Volumes = append(pod.Volumes, auditShipperVolume(cluster))
 	}
 	return sts, nil
+}
+
+func credentialsVersionAnnotation(version string) map[string]string {
+	if version == "" {
+		return nil
+	}
+	return map[string]string{annotationCredentialsVersion: version}
 }

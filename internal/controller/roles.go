@@ -16,13 +16,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -428,28 +428,15 @@ func (r *PostgresClusterReconciler) reconcileRoles(
 	if r.SQL == nil || !rolesWanted(cluster) {
 		return true, nil
 	}
-	log := logf.FromContext(ctx)
 	key := cluster.Namespace + "/" + cluster.Name
+	now := time.Now()
 
-	passwords := map[string]string{}
-	versions := make([]string, 0, len(cluster.Spec.Roles))
-	for i := range cluster.Spec.Roles {
-		role := &cluster.Spec.Roles[i]
-		secret := &corev1.Secret{}
-		err := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: role.RoleSecretName(cluster.Name)}, secret)
-		switch {
-		case apierrors.IsNotFound(err):
-			// Only for a Secret that was not made because it clashed.
-			continue
-		case err != nil:
-			return false, err
-		}
-		passwords[role.Name] = string(secret.Data[secretKeyPassword])
-		versions = append(versions, role.Name+"="+secret.ResourceVersion)
+	held, err := r.readRoleSecrets(ctx, cluster, secretProblems, now)
+	if err != nil {
+		return false, err
 	}
-	inputs := strconv.FormatInt(cluster.Generation, 10) + "|" + strings.Join(versions, ",") + "|" + fmt.Sprint(len(secretProblems))
-
-	if trusted, ok := r.rolesVerified.Load(key); ok {
+	inputs := strconv.FormatInt(cluster.Generation, 10) + "|" + strings.Join(held.versions, ",") + "|" + fmt.Sprint(len(secretProblems))
+	if trusted, ok := r.rolesVerified.Load(key); ok && len(held.rotating) == 0 {
 		t := trusted.(rolesTrust)
 		if t.inputs == inputs && time.Since(t.at) < rolesVerifyInterval && rolesSettled(cluster) {
 			return true, nil
@@ -460,53 +447,30 @@ func (r *PostgresClusterReconciler) reconcileRoles(
 	if err != nil {
 		return false, err
 	}
+	fail := func(state, message string) (bool, error) {
+		return false, r.setRoleStatuses(ctx, cluster, r.allSpecRoles(cluster, state, message))
+	}
 	if address == "" {
-		return false, r.setRoleStatuses(ctx, cluster, r.allSpecRoles(cluster, dbv1alpha1.RolePending, "the cluster has no primary yet"))
+		return fail(dbv1alpha1.RolePending, "the cluster has no primary yet")
 	}
 	target, err := r.superuserTarget(ctx, cluster, address)
 	if err != nil {
-		return false, r.setRoleStatuses(ctx, cluster, r.allSpecRoles(cluster, dbv1alpha1.RoleError, err.Error()))
+		return fail(dbv1alpha1.RoleError, err.Error())
 	}
 	session, err := r.SQL.Dial(ctx, target)
 	if err != nil {
-		return false, r.setRoleStatuses(ctx, cluster, r.allSpecRoles(cluster, dbv1alpha1.RoleError,
-			fmt.Sprintf("could not connect to the primary on port %d: %v", postgresPort, err)))
+		return fail(dbv1alpha1.RoleError, fmt.Sprintf("could not connect to the primary on port %d: %v", postgresPort, err))
 	}
 	defer session.Close(ctx)
 
-	names := make([]string, 0, len(cluster.Spec.Roles))
-	for i := range cluster.Spec.Roles {
-		names = append(names, cluster.Spec.Roles[i].Name)
-	}
-	answer, err := session.QueryText(ctx, rolesObservedSQL(names))
+	observed, err := readObservedRoles(ctx, session, cluster)
 	if err != nil {
-		return false, r.setRoleStatuses(ctx, cluster, r.allSpecRoles(cluster, dbv1alpha1.RoleError, "could not read the roles: "+err.Error()))
+		return fail(dbv1alpha1.RoleError, "could not read the roles: "+err.Error())
 	}
-	observed := &observedRoles{}
-	if err := json.Unmarshal([]byte(answer), observed); err != nil {
-		return false, r.setRoleStatuses(ctx, cluster, r.allSpecRoles(cluster, dbv1alpha1.RoleError, "could not read the roles: "+err.Error()))
-	}
-
-	outcomes := planRoles(cluster, observed, passwords, secretProblems)
-	statuses := make([]dbv1alpha1.RoleStatus, 0, len(outcomes))
-	ready := true
-	for i := range outcomes {
-		outcome := &outcomes[i]
-		for _, statement := range outcome.statements {
-			if err := session.Exec(ctx, statement); err != nil {
-				// The statement can hold a verifier; the error does not.
-				outcome.status.State, outcome.status.Message = dbv1alpha1.RoleError, "could not apply the change: "+err.Error()
-				break
-			}
-		}
-		if len(outcome.statements) > 0 && outcome.status.State == dbv1alpha1.RoleReady {
-			log.Info("Updated database role", "role", outcome.status.Name, "statements", len(outcome.statements))
-		}
-		ready = ready && outcome.status.State != dbv1alpha1.RoleError
-		statuses = append(statuses, outcome.status)
-	}
-	if len(statuses) > maxRoleStatuses {
-		statuses = statuses[:maxRoleStatuses]
+	outcomes := planRoles(cluster, observed, held.passwords, secretProblems)
+	statuses, ready, err := r.applyRoleOutcomes(ctx, session, outcomes, held, now)
+	if err != nil {
+		return false, err
 	}
 	if ready {
 		r.rolesVerified.Store(key, rolesTrust{inputs: inputs, at: time.Now()})
@@ -514,6 +478,119 @@ func (r *PostgresClusterReconciler) reconcileRoles(
 		r.rolesVerified.Delete(key)
 	}
 	return ready, r.setRoleStatuses(ctx, cluster, statuses)
+}
+
+// roleSecrets is what the operator holds for the roles in the spec: their
+// Secrets, the passwords in them, and the new password of each role whose
+// password is due to be replaced.
+type roleSecrets struct {
+	passwords map[string]string
+	secrets   map[string]*corev1.Secret
+	// rotating holds the new password of each role due for one. It is set in
+	// the database and only then written to the Secret.
+	rotating map[string]string
+	versions []string
+}
+
+// readRoleSecrets reads each role's Secret and works out which are due for a
+// new password.
+func (r *PostgresClusterReconciler) readRoleSecrets(
+	ctx context.Context, cluster *dbv1alpha1.PostgresCluster, problems map[string]string, now time.Time,
+) (*roleSecrets, error) {
+	held := &roleSecrets{
+		passwords: map[string]string{}, secrets: map[string]*corev1.Secret{}, rotating: map[string]string{},
+		versions: make([]string, 0, len(cluster.Spec.Roles)),
+	}
+	for i := range cluster.Spec.Roles {
+		role := &cluster.Spec.Roles[i]
+		secret := &corev1.Secret{}
+		err := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: role.RoleSecretName(cluster.Name)}, secret)
+		switch {
+		case apierrors.IsNotFound(err):
+			// Only for a Secret that was not made because it clashed.
+			continue
+		case err != nil:
+			return nil, err
+		}
+		held.secrets[role.Name] = secret
+		held.passwords[role.Name] = string(secret.Data[secretKeyPassword])
+		held.versions = append(held.versions, role.Name+"="+secret.ResourceVersion)
+		if due, _ := rotationDue(secret, role.RotateEvery, now); due && problems[role.Name] == "" && len(secret.Data[secretKeyPassword]) > 0 {
+			fresh, err := generatePassword()
+			if err != nil {
+				return nil, err
+			}
+			held.rotating[role.Name] = fresh
+			held.passwords[role.Name] = fresh
+		}
+	}
+	return held, nil
+}
+
+// readObservedRoles asks the database what the planner needs to know.
+func readObservedRoles(ctx context.Context, session SQLSession, cluster *dbv1alpha1.PostgresCluster) (*observedRoles, error) {
+	names := make([]string, 0, len(cluster.Spec.Roles))
+	for i := range cluster.Spec.Roles {
+		names = append(names, cluster.Spec.Roles[i].Name)
+	}
+	answer, err := session.QueryText(ctx, rolesObservedSQL(names))
+	if err != nil {
+		return nil, err
+	}
+	observed := &observedRoles{}
+	if err := json.Unmarshal([]byte(answer), observed); err != nil {
+		return nil, err
+	}
+	return observed, nil
+}
+
+// applyRoleOutcomes runs the statements of each outcome, writes the new
+// password of a role that was replaced to its Secret once the database has it,
+// and returns the status of every role and whether all are fine.
+func (r *PostgresClusterReconciler) applyRoleOutcomes(
+	ctx context.Context, session SQLSession, outcomes []roleOutcome, held *roleSecrets, now time.Time,
+) ([]dbv1alpha1.RoleStatus, bool, error) {
+	log := logf.FromContext(ctx)
+	statuses := make([]dbv1alpha1.RoleStatus, 0, len(outcomes))
+	ready := true
+	for i := range outcomes {
+		outcome := &outcomes[i]
+		applied := true
+		for _, statement := range outcome.statements {
+			if err := session.Exec(ctx, statement); err != nil {
+				// The statement can hold a verifier; the error does not.
+				outcome.status.State, outcome.status.Message = dbv1alpha1.RoleError, "could not apply the change: "+err.Error()
+				applied = false
+				break
+			}
+		}
+		if len(outcome.statements) > 0 && outcome.status.State == dbv1alpha1.RoleReady {
+			log.Info("Updated database role", "role", outcome.status.Name, "statements", len(outcome.statements))
+		}
+		if secret, ok := held.secrets[outcome.status.Name]; ok {
+			rotated := lastRotated(secret)
+			if fresh, isRotating := held.rotating[outcome.status.Name]; isRotating && applied && len(outcome.statements) > 0 {
+				// The database has the new password; now the Secret does.
+				if err := r.patchSecret(ctx, secret, func(s *corev1.Secret) {
+					s.Data[secretKeyPassword] = []byte(fresh)
+					stampRotation(s, now)
+				}); err != nil {
+					return nil, false, fmt.Errorf("writing the new password of role %s: %w", outcome.status.Name, err)
+				}
+				log.Info("Replaced a role's password", "role", outcome.status.Name)
+				rotated = now
+			}
+			if outcome.status.State != dbv1alpha1.RoleDisabled {
+				outcome.status.LastRotated = timePtr(rotated)
+			}
+		}
+		ready = ready && outcome.status.State != dbv1alpha1.RoleError
+		statuses = append(statuses, outcome.status)
+	}
+	if len(statuses) > maxRoleStatuses {
+		statuses = statuses[:maxRoleStatuses]
+	}
+	return statuses, ready, nil
 }
 
 // rolesSettled reports whether status shows every role in order, so that
@@ -565,7 +642,7 @@ func (r *PostgresClusterReconciler) setRoleStatuses(ctx context.Context, cluster
 	if len(statuses) == 0 {
 		statuses = nil
 	}
-	changed := !reflect.DeepEqual(cluster.Status.AccessControl.Roles, statuses)
+	changed := !equality.Semantic.DeepEqual(cluster.Status.AccessControl.Roles, statuses)
 	cluster.Status.AccessControl.Roles = statuses
 
 	if len(cluster.Spec.Roles) == 0 {

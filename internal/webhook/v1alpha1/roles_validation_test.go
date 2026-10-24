@@ -12,6 +12,7 @@ package v1alpha1
 
 import (
 	"context"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -73,6 +74,54 @@ var _ = Describe("PostgresCluster roles validation", func() {
 		cluster.Spec.Roles = []dbv1alpha1.RoleSpec{{Name: "a", Database: "d"}, {Name: "b", Database: "d"}}
 		_, err := validator.ValidateCreate(ctx, cluster)
 		Expect(err).To(MatchError(ContainSubstring("one owner")))
+	})
+
+	Describe("rotation", func() {
+		day := func(n int) *metav1.Duration { return &metav1.Duration{Duration: time.Duration(n) * 24 * time.Hour} }
+		It("refuses a password that would change more than once a day, on a role or on the cluster", func() {
+			cluster.Spec.Roles = []dbv1alpha1.RoleSpec{{Name: appRole, RotateEvery: &metav1.Duration{Duration: time.Hour}}}
+			_, err := validator.ValidateCreate(ctx, cluster)
+			Expect(err).To(MatchError(ContainSubstring("spec.roles[0].rotateEvery")))
+
+			cluster.Spec.Roles = nil
+			cluster.Spec.CredentialRotation = &dbv1alpha1.CredentialRotationSpec{SuperuserEvery: &metav1.Duration{Duration: time.Hour}}
+			_, err = validator.ValidateUpdate(ctx, cluster.DeepCopy(), cluster)
+			Expect(err).To(MatchError(ContainSubstring("spec.credentialRotation.superuserEvery")))
+		})
+
+		It("admits a day or more", func() {
+			cluster.Spec.Roles = []dbv1alpha1.RoleSpec{{Name: appRole, RotateEvery: day(90)}}
+			cluster.Spec.CredentialRotation = &dbv1alpha1.CredentialRotationSpec{SuperuserEvery: day(30), MonitorEvery: day(7)}
+			_, err := validator.ValidateCreate(ctx, cluster)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("warns that a schedule for the superuser's password replaces every pod, when it is set or changed", func() {
+			cluster.Spec.CredentialRotation = &dbv1alpha1.CredentialRotationSpec{SuperuserEvery: day(30)}
+			warnings, err := validator.ValidateCreate(ctx, cluster)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(warnings).To(HaveLen(1))
+			Expect(warnings[0]).To(ContainSubstring("every database pod"))
+			Expect(warnings[0]).To(ContainSubstring("720h"))
+
+			before := cluster.DeepCopy()
+			warnings, err = validator.ValidateUpdate(ctx, before, cluster)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(warnings).To(BeEmpty(), "unchanged")
+
+			cluster.Spec.CredentialRotation.SuperuserEvery = day(60)
+			warnings, err = validator.ValidateUpdate(ctx, before, cluster)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(warnings).To(HaveLen(1))
+		})
+
+		It("does not warn about a schedule for roles or for the monitor, which replace no pod", func() {
+			cluster.Spec.Roles = []dbv1alpha1.RoleSpec{{Name: appRole, RotateEvery: day(90)}}
+			cluster.Spec.CredentialRotation = &dbv1alpha1.CredentialRotationSpec{MonitorEvery: day(7)}
+			warnings, err := validator.ValidateCreate(ctx, cluster)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(warnings).To(BeEmpty())
+		})
 	})
 
 	Describe("what it warns about", func() {

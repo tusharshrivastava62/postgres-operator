@@ -467,3 +467,46 @@ func asRole(pod, cluster, secret, database, sql string) (string, error) {
 func roleState(cluster, role string) (string, error) {
 	return clusterFieldOf(cluster, `.status.accessControl.roles[?(@.name=="`+role+`")].state`)
 }
+
+// roleWriterManifest is a pod that inserts a row every 100ms through the
+// read-write Service as an application role, with the details in a Secret that
+// it reads when it starts, and logs "ok <ms>" or "fail <ms>" for each attempt.
+func roleWriterManifest(image, secret, database, table string) string {
+	return fmt.Sprintf(`apiVersion: v1
+kind: Pod
+metadata:
+  name: role-writer
+  namespace: %[1]s
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 101
+    runAsGroup: 103
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+  - name: writer
+    image: %[2]s
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities: {drop: [ALL]}
+    env:
+    - {name: PGCONNECT_TIMEOUT, value: "2"}
+    - {name: PGSSLMODE, value: require}
+    - {name: PGUSER, valueFrom: {secretKeyRef: {name: %[3]s, key: username}}}
+    - {name: PGPASSWORD, valueFrom: {secretKeyRef: {name: %[3]s, key: password}}}
+    command:
+    - bash
+    - -c
+    - |
+      while true; do
+        s=$(date +%%s%%3N)
+        if psql -h %[6]s -d %[4]s -tAX -c "insert into %[5]s values (1)" >/dev/null 2>&1; then
+          echo "ok $s"
+        else
+          echo "fail $s"
+        fi
+        sleep 0.1
+      done
+`, clusterNamespace, image, secret, database, table, clusterName)
+}

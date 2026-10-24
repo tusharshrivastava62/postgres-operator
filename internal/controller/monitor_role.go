@@ -16,6 +16,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -212,11 +213,14 @@ func (r *PostgresClusterReconciler) reconcileMonitorRole(ctx context.Context, cl
 	secret := &corev1.Secret{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: monitorSecretName(cluster)}, secret); err != nil {
 		if apierrors.IsNotFound(err) {
-			return false, r.setMonitorStatus(ctx, cluster, dbv1alpha1.RolePending, "the monitor Secret does not exist yet")
+			return false, r.setMonitorStatus(ctx, cluster, dbv1alpha1.RolePending, "the monitor Secret does not exist yet", time.Time{})
 		}
 		return false, err
 	}
-	if trusted, ok := r.monitorVerified.Load(key); ok {
+	now := time.Now()
+	due, _ := rotationDue(secret, rotationSpec(cluster).MonitorEvery, now)
+	rotated := lastRotated(secret)
+	if trusted, ok := r.monitorVerified.Load(key); ok && !due {
 		t := trusted.(monitorTrust)
 		if t.secretVersion == secret.ResourceVersion && time.Since(t.at) < monitorVerifyInterval &&
 			cluster.Status.AccessControl.MonitorRole.State == dbv1alpha1.RoleReady {
@@ -229,31 +233,70 @@ func (r *PostgresClusterReconciler) reconcileMonitorRole(ctx context.Context, cl
 		return false, err
 	}
 	if address == "" {
-		return false, r.setMonitorStatus(ctx, cluster, dbv1alpha1.RolePending, "the cluster has no primary yet")
+		return false, r.setMonitorStatus(ctx, cluster, dbv1alpha1.RolePending, "the cluster has no primary yet", rotated)
 	}
 	target := SQLTarget{Host: address, Port: postgresPort, Database: monitorDatabase,
 		User: monitorRoleName, Password: string(secret.Data[secretKeyPassword])}
 
+	if due {
+		return r.rotateMonitorPassword(ctx, cluster, secret, target, now)
+	}
+
 	verified, err := r.verifyMonitorRole(ctx, target)
 	if err != nil {
 		return false, r.setMonitorStatus(ctx, cluster, dbv1alpha1.RoleError,
-			fmt.Sprintf("could not connect to %s on port %d: %v", leader, postgresPort, err))
+			fmt.Sprintf("could not connect to %s on port %d: %v", leader, postgresPort, err), rotated)
 	}
 	if !verified {
 		log.Info("setting up the monitor role", "role", monitorRoleName, "primary", leader)
 		if err := r.setUpMonitorRole(ctx, cluster, target); err != nil {
-			return false, r.setMonitorStatus(ctx, cluster, dbv1alpha1.RoleError, "could not set up the role: "+err.Error())
+			return false, r.setMonitorStatus(ctx, cluster, dbv1alpha1.RoleError, "could not set up the role: "+err.Error(), rotated)
 		}
 		if verified, err = r.verifyMonitorRole(ctx, target); err != nil || !verified {
 			reason := "the role does not have the expected privileges"
 			if err != nil {
 				reason = err.Error()
 			}
-			return false, r.setMonitorStatus(ctx, cluster, dbv1alpha1.RoleError, "set up the role, but it cannot be used: "+reason)
+			return false, r.setMonitorStatus(ctx, cluster, dbv1alpha1.RoleError, "set up the role, but it cannot be used: "+reason, rotated)
 		}
 	}
 	r.monitorVerified.Store(key, monitorTrust{secretVersion: secret.ResourceVersion, at: time.Now()})
-	return true, r.setMonitorStatus(ctx, cluster, dbv1alpha1.RoleReady, "")
+	return true, r.setMonitorStatus(ctx, cluster, dbv1alpha1.RoleReady, "", rotated)
+}
+
+// rotateMonitorPassword replaces the monitor role's password: the database
+// first, checked by logging in with it, then the Secret. The jobs read the
+// Secret each time they run, so a job that started a moment before may fail
+// once, and the next run is right.
+func (r *PostgresClusterReconciler) rotateMonitorPassword(
+	ctx context.Context, cluster *dbv1alpha1.PostgresCluster, secret *corev1.Secret, target SQLTarget, now time.Time,
+) (bool, error) {
+	rotated := lastRotated(secret)
+	fresh, err := generatePassword()
+	if err != nil {
+		return false, err
+	}
+	target.Password = fresh
+	if err := r.setUpMonitorRole(ctx, cluster, target); err != nil {
+		return false, r.setMonitorStatus(ctx, cluster, dbv1alpha1.RoleError, "could not replace the password: "+err.Error(), rotated)
+	}
+	verified, err := r.verifyMonitorRole(ctx, target)
+	if err != nil || !verified {
+		reason := "the role does not have the expected privileges"
+		if err != nil {
+			reason = err.Error()
+		}
+		return false, r.setMonitorStatus(ctx, cluster, dbv1alpha1.RoleError, "replaced the password, but the role cannot be used: "+reason, rotated)
+	}
+	if err := r.patchSecret(ctx, secret, func(s *corev1.Secret) {
+		s.Data[secretKeyPassword] = []byte(fresh)
+		stampRotation(s, now)
+	}); err != nil {
+		return false, fmt.Errorf("writing the new monitor password: %w", err)
+	}
+	logf.FromContext(ctx).Info("Replaced the monitor role's password")
+	r.monitorVerified.Store(cluster.Namespace+"/"+cluster.Name, monitorTrust{secretVersion: secret.ResourceVersion, at: now})
+	return true, r.setMonitorStatus(ctx, cluster, dbv1alpha1.RoleReady, "", now)
 }
 
 // verifyMonitorRole logs in as the role and asks whether it is as it should be.
@@ -295,12 +338,17 @@ func (r *PostgresClusterReconciler) setUpMonitorRole(ctx context.Context, cluste
 }
 
 // setMonitorStatus records the role's state, writing status only if it changed.
-func (r *PostgresClusterReconciler) setMonitorStatus(ctx context.Context, cluster *dbv1alpha1.PostgresCluster, state, message string) error {
+func (r *PostgresClusterReconciler) setMonitorStatus(
+	ctx context.Context, cluster *dbv1alpha1.PostgresCluster, state, message string, rotated time.Time,
+) error {
 	if len(message) > monitorMessageLimit {
 		message = message[:monitorMessageLimit]
 	}
 	want := dbv1alpha1.RoleStatus{Name: monitorRoleName, State: state, SecretName: monitorSecretName(cluster), Message: message}
-	if cluster.Status.AccessControl.MonitorRole == want {
+	if !rotated.IsZero() {
+		want.LastRotated = timePtr(rotated)
+	}
+	if equality.Semantic.DeepEqual(cluster.Status.AccessControl.MonitorRole, want) {
 		return nil
 	}
 	cluster.Status.AccessControl.MonitorRole = want
