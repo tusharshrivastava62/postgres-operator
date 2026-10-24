@@ -1,0 +1,34 @@
+# A cluster with database roles for two applications, replaced on a schedule, and with the
+# credentials the operator holds replaced on a schedule too. See docs/access-control.md.
+#
+# Each role gets a generated password in a Secret named <cluster>-role-<role>, with underscores
+# written as hyphens (here: postgrescluster-access-sample-role-app-orders). The operator never
+# sends a password to the database, only a hash of it.
+apiVersion: db.youroperator.io/v1alpha1
+kind: PostgresCluster
+metadata:
+  labels:
+    app.kubernetes.io/name: postgres-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: postgrescluster-access-sample
+spec:
+  instances: 3
+  version: "17"
+  storage:
+    size: 10Gi
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      memory: "1Gi"
+  roles:
+  - name: app_orders
+    database: orders        # created for the role to own; everyone else is refused connection
+    connectionLimit: 20
+    rotateEvery: 2160h      # 90 days. At least 24h. Leave it out to replace the password only when asked.
+  - name: reporting         # a login with no database of its own
+  credentialRotation:
+    monitorEvery: 720h      # the read-only role the operator's own jobs connect as
+    # superuserEvery: 4320h # the superuser and replication passwords. Every database pod is
+    #                       # replaced, one at a time, each time: leave it out unless you want that.

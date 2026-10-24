@@ -4,5 +4,6 @@ resources:
 - db_v1alpha1_postgrescluster_backup.yaml
 - db_v1alpha1_postgrescluster_restore.yaml
 - db_v1alpha1_postgrescluster_compliance.yaml
+- db_v1alpha1_postgrescluster_access.yaml
 - db_v1alpha1_postgresemergencyaccess.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

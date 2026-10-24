@@ -196,8 +196,9 @@ client is a declaration by the pod, so anyone who can create pods in the namespa
 themselves access. Namespace permissions are outside what is checked.
 
 **Who can do what inside the database.** No least-privilege checks, no password rotation, no
-review of roles. The operator's jobs connect as the read-only role, and the passwords of that
-role and of the superuser are never rotated.
+review of roles. The operator's jobs connect as the read-only role. Passwords can be replaced, on
+request or on a schedule, but nothing checks that they are, or how old they are:
+see [access-control.md](access-control.md).
 
 **Emergency access, if you allow it.** A person who has escalated with emergency access
 (see [emergency-access.md](emergency-access.md)) is not recorded by pgaudit: their reads and writes
