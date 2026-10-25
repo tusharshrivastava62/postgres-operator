@@ -177,16 +177,16 @@ func backupStatusCronJobSpec(cluster *dbv1alpha1.PostgresCluster, image string) 
 		{Name: "RETAIN_FULL", Value: strconv.Itoa(int(backup.Retention.Full))},
 		{Name: "RETAIN_DAYS", Value: strconv.Itoa(int(backup.Retention.Days))},
 		// The read-write Service, over TLS: the database accepts nothing else.
-		{Name: "PGHOST", Value: cluster.Name},
+		{Name: "PGHOST", Value: jobHost(cluster)},
 		{Name: "PGPORT", Value: strconv.Itoa(int(postgresPort))},
 		{Name: "PGDATABASE", Value: "postgres"},
-		{Name: "PGSSLMODE", Value: "require"},
 		{Name: "PGCONNECT_TIMEOUT", Value: "10"},
 		{Name: "PGUSER", ValueFrom: monitorSecretKeyRef(cluster, secretKeyUsername)},
 		{Name: "PGPASSWORD", ValueFrom: monitorSecretKeyRef(cluster, secretKeyPassword)},
 	}, walgClientEnv(cluster)...)
+	env = append(env, jobSSLEnv(cluster)...)
 
-	return batchv1.CronJobSpec{
+	spec := batchv1.CronJobSpec{
 		Schedule: backupStatusSchedule,
 		// A run that overlaps the last would race it over retention.
 		ConcurrencyPolicy:          batchv1.ForbidConcurrent,
@@ -241,6 +241,8 @@ func backupStatusCronJobSpec(cluster *dbv1alpha1.PostgresCluster, image string) 
 			},
 		},
 	}
+	trustTLSCA(cluster, &spec.JobTemplate.Spec.Template.Spec)
+	return spec
 }
 
 // backupReport is what one run of the status script wrote to its termination

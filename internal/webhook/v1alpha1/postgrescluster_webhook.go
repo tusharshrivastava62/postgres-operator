@@ -71,9 +71,11 @@ func (v *PostgresClusterCustomValidator) ValidateCreate(_ context.Context, obj *
 	errs = append(errs, validateBackup(obj, time.Now())...)
 	errs = append(errs, validateCompliance(obj)...)
 	errs = append(errs, validateRoles(obj)...)
+	errs = append(errs, validateSecurity(obj)...)
 	warnings := append(warningsFor(obj), backupWarnings(nil, obj)...)
 	warnings = append(warnings, complianceWarnings(nil, obj)...)
 	warnings = append(warnings, roleWarnings(nil, obj)...)
+	warnings = append(warnings, securityWarnings(nil, obj)...)
 	return append(warnings, emergencyWarnings(nil, obj)...), invalidError(obj, errs)
 }
 
@@ -92,9 +94,11 @@ func (v *PostgresClusterCustomValidator) ValidateUpdate(_ context.Context, oldOb
 	errs = append(errs, validateBackup(newObj, time.Now())...)
 	errs = append(errs, validateCompliance(newObj)...)
 	errs = append(errs, validateRoles(newObj)...)
+	errs = append(errs, validateSecurity(newObj)...)
 	warnings := append(warningsFor(newObj), backupWarnings(oldObj, newObj)...)
 	warnings = append(warnings, complianceWarnings(oldObj, newObj)...)
 	warnings = append(warnings, roleWarnings(oldObj, newObj)...)
+	warnings = append(warnings, securityWarnings(oldObj, newObj)...)
 	return append(warnings, emergencyWarnings(oldObj, newObj)...), invalidError(newObj, errs)
 }
 

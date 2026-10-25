@@ -282,6 +282,9 @@ func desiredStatefulSetAt(cluster *dbv1alpha1.PostgresCluster, image, credential
 		pod.Containers = append(pod.Containers, auditShipperContainer(cluster, image))
 		pod.Volumes = append(pod.Volumes, auditShipperVolume(cluster))
 	}
+	if secretName := cluster.Spec.Security.TLSSecretName(); secretName != "" {
+		useTLS(sts, secretName)
+	}
 	return sts, nil
 }
 

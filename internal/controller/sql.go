@@ -13,6 +13,7 @@ package controller
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"strings"
 	"time"
@@ -43,6 +44,20 @@ type SQLTarget struct {
 	Database string
 	User     string
 	Password string
+
+	// TLS says how to check the server's certificate. Unset, the connection is
+	// encrypted and the certificate is not checked, which is all a server with a
+	// certificate it made for itself allows.
+	TLS *SQLTLS
+}
+
+// SQLTLS is what a connection checks the server's certificate against.
+type SQLTLS struct {
+	// Roots are the CAs the certificate must chain to, and no others.
+	Roots *x509.CertPool
+	// ServerName is the name the certificate must be valid for. The connection
+	// is made to an address, so the name is given here.
+	ServerName string
 }
 
 // SQLSession is one open connection to a database.
@@ -56,6 +71,9 @@ type SQLSession interface {
 	// QueryText runs a query that returns a single text value, such as a JSON
 	// document the query built, and returns it.
 	QueryText(ctx context.Context, sql string) (string, error)
+	// PeerCertificate is the certificate the server presented, or nil if the
+	// connection did not use TLS.
+	PeerCertificate() *x509.Certificate
 	Close(ctx context.Context)
 }
 
@@ -85,11 +103,17 @@ func (pgxDialer) Dial(ctx context.Context, target SQLTarget) (SQLSession, error)
 	cfg.Password = target.Password
 	cfg.ConnectTimeout = sqlConnectTimeout
 	cfg.RuntimeParams["application_name"] = sqlApplicationName
-	// Spilo's server certificate is generated when the container starts and
-	// is signed by nothing the operator could know, so it is not verified:
-	// the connection is encrypted, not authenticated. Making the certificate
-	// verifiable is part of the security hardening stage.
-	cfg.TLSConfig = &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12} //nolint:gosec // see above
+	if target.TLS != nil {
+		// The cluster was given a certificate: check it against its CA and the
+		// name it must be valid for, and refuse a server that fails.
+		cfg.TLSConfig = &tls.Config{RootCAs: target.TLS.Roots, ServerName: target.TLS.ServerName, MinVersion: tls.VersionTLS12}
+	} else {
+		// Spilo's server certificate is generated when the container starts and
+		// is signed by nothing the operator could know, so it is not verified:
+		// the connection is encrypted, not authenticated. spec.security.tls
+		// is how to change that.
+		cfg.TLSConfig = &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12} //nolint:gosec // see above
+	}
 	cfg.Fallbacks = nil
 
 	conn, err := pgx.ConnectConfig(ctx, cfg)
@@ -118,6 +142,17 @@ func (s *pgxSession) QueryText(ctx context.Context, sql string) (string, error) 
 	var answer string
 	err := s.conn.QueryRow(ctx, sql, pgx.QueryExecModeSimpleProtocol).Scan(&answer)
 	return answer, err
+}
+
+func (s *pgxSession) PeerCertificate() *x509.Certificate {
+	conn, ok := s.conn.PgConn().Conn().(*tls.Conn)
+	if !ok {
+		return nil
+	}
+	if certs := conn.ConnectionState().PeerCertificates; len(certs) > 0 {
+		return certs[0]
+	}
+	return nil
 }
 
 func (s *pgxSession) Close(ctx context.Context) { _ = s.conn.Close(ctx) }

@@ -218,7 +218,11 @@ func (r *PostgresClusterReconciler) reconcileCredentialRotation(
 
 	// 2. Set them in the database, unless that is done already.
 	superuser := string(secret.Data[secretKeyUsername])
-	target := SQLTarget{Host: address, Port: postgresPort, Database: monitorDatabase, User: superuser}
+	tlsCheck, err := sqlTLSFor(ctx, r.Client, cluster, address)
+	if err != nil {
+		return fail("could not check the database's certificate: " + err.Error())
+	}
+	target := SQLTarget{Host: address, Port: postgresPort, Database: monitorDatabase, User: superuser, TLS: tlsCheck}
 	changed, err := r.superuserPasswordChanged(ctx, target, secret)
 	if err != nil {
 		return fail("could not tell which superuser password the database has: " + err.Error())

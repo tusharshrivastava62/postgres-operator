@@ -246,6 +246,25 @@ var _ = Describe("The compliance controls", func() {
 			Expect(c.Evidence).To(ContainSubstring("not issued by a certificate authority"))
 		})
 
+		It("says the certificate was verified, and by whom it was issued, once the operator has verified one", func() {
+			in := inputs()
+			in.Cluster.Spec.Security = &dbv1alpha1.SecuritySpec{TLS: &dbv1alpha1.TLSSpec{SecretName: testTLSSecret}}
+			notAfter := metav1.NewTime(time.Date(2027, 3, 4, 5, 6, 7, 0, time.UTC))
+			in.Cluster.Status.Security.TLS = &dbv1alpha1.TLSStatus{Verified: true, Issuer: "orders-ca", NotAfter: &notAfter}
+			c := resultOf(dbv1alpha1.ControlEncryptionInTransit, in)
+			Expect(c.Status).To(Equal(dbv1alpha1.ControlMet))
+			Expect(c.Evidence).To(And(ContainSubstring("issued by orders-ca"), ContainSubstring("verified"), ContainSubstring("2027-03-04")))
+			Expect(c.Evidence).NotTo(ContainSubstring("not issued by a certificate authority"))
+
+			By("and goes back to saying it is not one a client can verify when it has not verified one")
+			in.Cluster.Status.Security.TLS = &dbv1alpha1.TLSStatus{Verified: false}
+			Expect(resultOf(dbv1alpha1.ControlEncryptionInTransit, in).Evidence).To(ContainSubstring("not issued by a certificate authority"))
+			in.Cluster.Status.Security.TLS = &dbv1alpha1.TLSStatus{Verified: true, Issuer: "orders-ca", NotAfter: &notAfter}
+			in.Cluster.Spec.Security = nil
+			Expect(resultOf(dbv1alpha1.ControlEncryptionInTransit, in).Evidence).To(ContainSubstring("not issued by a certificate authority"),
+				"a certificate that is no longer asked for is not one the cluster has")
+		})
+
 		It("is not met when ssl is off", func() {
 			in := inputs()
 			in.Check.report.SQL.Settings["ssl"] = valueOff

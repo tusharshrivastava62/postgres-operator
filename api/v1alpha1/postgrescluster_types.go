@@ -105,6 +105,12 @@ type PostgresClusterSpec struct {
 	// +optional
 	EmergencyAccess *EmergencyAccessSpec `json:"emergencyAccess,omitempty"`
 
+	// security hardens the cluster beyond its defaults: a certificate you
+	// supply. Everything in it is off unless set, and changing it replaces the
+	// pods one at a time.
+	// +optional
+	Security *SecuritySpec `json:"security,omitempty"`
+
 	// image overrides the container image used for the PostgreSQL pods. When
 	// unset, the operator picks its built-in image for spec.version. Either
 	// way, the image actually in use is recorded in status.image, and an
@@ -441,6 +447,10 @@ type PostgresClusterStatus struct {
 	// +optional
 	AccessControl AccessControlStatus `json:"accessControl,omitzero"`
 
+	// security reports what the operator observed about spec.security.
+	// +optional
+	Security SecurityStatus `json:"security,omitzero"`
+
 	// conditions represent the current state of the PostgresCluster resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//
@@ -453,6 +463,7 @@ type PostgresClusterStatus struct {
 	// - "ReplicationHealthy": exactly one primary, and every replica is streaming within the lag limit
 	// - "FailoverInProgress": there is currently no primary, so a leader election is under way
 	// - "ControlsMet": every control of the selected compliance standard is Met
+	// - "TLSReady": the database presents the certificate in spec.security.tls and the operator verified it
 	//
 	// The status of each condition is one of True, False, or Unknown.
 	// +listType=map

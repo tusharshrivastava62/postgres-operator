@@ -163,12 +163,11 @@ func cronJob(labels map[string]string, pod corev1.PodSpec, deadline int64) batch
 // network policy lets it reach the database.
 func complianceCheckCronJobSpec(cluster *dbv1alpha1.PostgresCluster, image string) batchv1.CronJobSpec {
 	dest := cluster.Spec.Compliance.AuditLogs.Destination
-	env := []corev1.EnvVar{
+	env := append([]corev1.EnvVar{
 		// The read-write Service, over TLS: the database accepts nothing else.
-		{Name: "PGHOST", Value: cluster.Name},
+		{Name: "PGHOST", Value: jobHost(cluster)},
 		{Name: "PGPORT", Value: strconv.Itoa(int(postgresPort))},
 		{Name: "PGDATABASE", Value: "postgres"},
-		{Name: "PGSSLMODE", Value: "require"},
 		{Name: "PGCONNECT_TIMEOUT", Value: "10"},
 		{Name: "PGUSER", ValueFrom: monitorSecretKeyRef(cluster, secretKeyUsername)},
 		{Name: "PGPASSWORD", ValueFrom: monitorSecretKeyRef(cluster, secretKeyPassword)},
@@ -179,8 +178,9 @@ func complianceCheckCronJobSpec(cluster *dbv1alpha1.PostgresCluster, image strin
 		{Name: "AUDIT_FORCE_PATH_STYLE", Value: fmt.Sprint(dest.ForcePathStyle)},
 		{Name: secretKeyAccessKey, ValueFrom: secretRef(dest.CredentialsSecret, secretKeyAccessKey)},
 		{Name: secretKeySecretKey, ValueFrom: secretRef(dest.CredentialsSecret, secretKeySecretKey)},
-	}
+	}, jobSSLEnv(cluster)...)
 	pod := strictPodSpec(strictContainer(complianceCheckContainer, image, complianceCheckFile, env), complianceScriptsName(cluster))
+	trustTLSCA(cluster, &pod)
 	return cronJob(complianceCheckLabels(cluster), pod, 600)
 }
 

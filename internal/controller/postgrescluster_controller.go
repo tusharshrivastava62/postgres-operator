@@ -157,27 +157,8 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			"spec.resources.limits.memory is required: PostgreSQL sizes its memory from the container limit")
 	}
 
-	// Backups name Secrets that the pods read as environment variables. A pod
-	// whose Secret is missing cannot start, so a typo in a running cluster's
-	// spec would take every restarted member down. Check first, and change
-	// nothing until the Secrets are right. Nothing watches those Secrets, so
-	// look again after a while.
-	problem, err := r.backupSecretProblem(ctx, cluster)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("checking backup secrets: %w", err)
-	}
-	if problem != "" {
-		log.Info("not reconciling: " + problem)
-		return ctrl.Result{RequeueAfter: backupSecretRecheckDelay}, r.markInvalidSpec(ctx, cluster, "BackupSecretProblem", problem)
-	}
-
-	// The webhook refuses roles that clash with the system's own, or with each
-	// other's Secrets, but a webhook is not always there. Roles are made with
-	// the superuser, so a name that slipped through must not reach it.
-	if errs := cluster.Spec.ValidateAccessControl(cluster.Name); len(errs) > 0 {
-		message := errs.ToAggregate().Error()
-		log.Info("not reconciling: invalid spec.roles: " + message)
-		return ctrl.Result{}, r.markInvalidSpec(ctx, cluster, "InvalidRoles", message)
+	if res, held, err := r.holdBackForSpec(ctx, cluster); held || err != nil {
+		return res, err
 	}
 
 	// A network policy has to name the operator, or it would cut the operator
@@ -243,6 +224,7 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}{
 		{"reconciling secret", func() error { return r.reconcileSecret(ctx, cluster) }},
 		{"reconciling the monitor secret", func() error { return r.reconcileMonitorSecret(ctx, cluster) }},
+		{"reconciling the TLS CA", func() error { return r.reconcileTLSCA(ctx, cluster) }},
 		{"reconciling the role secrets", func() (err error) {
 			roleSecretProblems, err = r.reconcileRoleSecrets(ctx, cluster)
 			return err
@@ -282,6 +264,13 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, fmt.Errorf("syncing patroni configuration: %w", err)
 	}
 
+	// Needs a primary too, and decides whether the jobs check its certificate.
+	// They are given the CA on the next look, so when that changes look soon.
+	tlsChanged, err := r.reconcileTLSStatus(ctx, cluster)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("checking the database's certificate: %w", err)
+	}
+
 	// Needs a primary, and so comes after everything that creates one. A role
 	// that is not ready yet is looked at again soon.
 	monitorReady, err := r.reconcileMonitorRole(ctx, cluster)
@@ -310,7 +299,41 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	return ctrl.Result{RequeueAfter: refreshDelay(refreshInputs{
 		rolling: rolling, synced: synced, healthy: view.healthy,
 		monitorReady: monitorReady, rolesReady: rolesReady, rotatingCredentials: rotatingCredentials,
+		tlsChanged: tlsChanged,
 	})}, nil
+}
+
+// holdBackForSpec stops a reconcile, changing nothing, while the spec names
+// something the cluster cannot be started with: Secrets that are missing, roles
+// that clash, or settings that are not valid. A running cluster keeps running
+// while the spec is wrong.
+func (r *PostgresClusterReconciler) holdBackForSpec(ctx context.Context, cluster *dbv1alpha1.PostgresCluster) (ctrl.Result, bool, error) {
+	log := logf.FromContext(ctx)
+
+	// Backups name Secrets that the pods read as environment variables. A pod
+	// whose Secret is missing cannot start, so a typo in a running cluster's
+	// spec would take every restarted member down. Check first, and change
+	// nothing until the Secrets are right. Nothing watches those Secrets, so
+	// look again after a while.
+	problem, err := r.backupSecretProblem(ctx, cluster)
+	if err != nil {
+		return ctrl.Result{}, true, fmt.Errorf("checking backup secrets: %w", err)
+	}
+	if problem != "" {
+		log.Info("not reconciling: " + problem)
+		return ctrl.Result{RequeueAfter: backupSecretRecheckDelay}, true, r.markInvalidSpec(ctx, cluster, "BackupSecretProblem", problem)
+	}
+
+	// The webhook refuses roles that clash with the system's own, or with each
+	// other's Secrets, but a webhook is not always there. Roles are made with
+	// the superuser, so a name that slipped through must not reach it.
+	if errs := cluster.Spec.ValidateAccessControl(cluster.Name); len(errs) > 0 {
+		message := errs.ToAggregate().Error()
+		log.Info("not reconciling: invalid spec.roles: " + message)
+		return ctrl.Result{}, true, r.markInvalidSpec(ctx, cluster, "InvalidRoles", message)
+	}
+
+	return r.holdBackForSecurity(ctx, cluster)
 }
 
 // refreshInputs is what decides how soon a cluster is looked at again.
@@ -319,6 +342,9 @@ type refreshInputs struct {
 	// rotatingCredentials is whether the superuser and replication passwords
 	// are being replaced, or are due and waiting to be.
 	rotatingCredentials bool
+	// tlsChanged is whether the jobs are due to start or stop checking the
+	// database's certificate, which takes another look.
+	tlsChanged bool
 }
 
 // refreshDelay is how long to wait before looking at a cluster again: soon
@@ -328,7 +354,7 @@ func refreshDelay(in refreshInputs) time.Duration {
 	switch {
 	case in.rolling:
 		return rolloutRequeueDelay
-	case !in.synced || !in.healthy || !in.monitorReady || !in.rolesReady || in.rotatingCredentials:
+	case !in.synced || !in.healthy || !in.monitorReady || !in.rolesReady || in.rotatingCredentials || in.tlsChanged:
 		return unhealthyRefreshInterval
 	}
 	return healthyRefreshInterval

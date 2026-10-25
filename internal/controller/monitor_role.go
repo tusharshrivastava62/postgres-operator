@@ -235,8 +235,12 @@ func (r *PostgresClusterReconciler) reconcileMonitorRole(ctx context.Context, cl
 	if address == "" {
 		return false, r.setMonitorStatus(ctx, cluster, dbv1alpha1.RolePending, "the cluster has no primary yet", rotated)
 	}
+	tlsCheck, err := sqlTLSFor(ctx, r.Client, cluster, address)
+	if err != nil {
+		return false, err
+	}
 	target := SQLTarget{Host: address, Port: postgresPort, Database: monitorDatabase,
-		User: monitorRoleName, Password: string(secret.Data[secretKeyPassword])}
+		User: monitorRoleName, Password: string(secret.Data[secretKeyPassword]), TLS: tlsCheck}
 
 	if due {
 		return r.rotateMonitorPassword(ctx, cluster, secret, target, now)

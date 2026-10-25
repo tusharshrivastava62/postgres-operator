@@ -636,9 +636,14 @@ func superuserTargetOf(ctx context.Context, reader client.Reader, cluster *dbv1a
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: credentialsSecretName(cluster)}, creds); err != nil {
 		return SQLTarget{}, fmt.Errorf("reading the superuser credentials: %w", err)
 	}
+	tlsCheck, err := sqlTLSFor(ctx, reader, cluster, address)
+	if err != nil {
+		return SQLTarget{}, err
+	}
 	return SQLTarget{
 		Host: address, Port: postgresPort, Database: monitorDatabase,
 		User: string(creds.Data[secretKeyUsername]), Password: string(creds.Data[secretKeyPassword]),
+		TLS: tlsCheck,
 	}, nil
 }
 

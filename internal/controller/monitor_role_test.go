@@ -12,6 +12,8 @@ package controller
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"regexp"
@@ -57,6 +59,10 @@ type fakeSQL struct {
 	monitorPrivileged bool
 	// unreachable, when set, is what every Dial fails with: the network is down.
 	unreachable error
+	// serving, when set, is the certificate the server presents. A connection
+	// that asks to check it is refused, as a real one would be, if it does not
+	// pass.
+	serving *x509.Certificate
 
 	// observed is what the role query answers with; execFailure, if it
 	// returns an error for a statement, is what running that statement does.
@@ -86,6 +92,12 @@ func (f *fakeSQL) Dial(_ context.Context, target SQLTarget) (SQLSession, error) 
 	f.dials = append(f.dials, target)
 	if f.unreachable != nil {
 		return nil, f.unreachable
+	}
+	if target.TLS != nil && f.serving != nil {
+		_, err := f.serving.Verify(x509.VerifyOptions{DNSName: target.TLS.ServerName, Roots: target.TLS.Roots})
+		if err != nil {
+			return nil, &tls.CertificateVerificationError{UnverifiedCertificates: []*x509.Certificate{f.serving}, Err: err}
+		}
 	}
 	switch target.User {
 	case monitorRoleName:
@@ -184,6 +196,8 @@ func (s *fakeSession) QueryText(_ context.Context, sql string) (string, error) {
 	}
 	return s.db.observed, nil
 }
+
+func (s *fakeSession) PeerCertificate() *x509.Certificate { return s.db.serving }
 
 func (s *fakeSession) Close(context.Context) {}
 
@@ -532,6 +546,9 @@ var _ = Describe("The monitor role", func() {
 			in = well
 			in.rotatingCredentials = true
 			Expect(refreshDelay(in)).To(Equal(unhealthyRefreshInterval), "the superuser and replication passwords are being replaced")
+			in = well
+			in.tlsChanged = true
+			Expect(refreshDelay(in)).To(Equal(unhealthyRefreshInterval), "the jobs are due to start or stop checking the certificate")
 		})
 		It("is soonest during a rolling update", func() {
 			in := well

@@ -1448,6 +1448,9 @@ c.delete_bucket_lifecycle(Bucket=os.environ["AUDIT_BUCKET"])
 		By("granting temporary superuser access for an emergency, recording it, and taking it away")
 		emergencyAccessScenario(primary)
 
+		By("giving the database a certificate that can be verified, and taking it away again")
+		tlsScenario(expectHealthy, podUIDs)
+
 		By("swapping one standard for another by reloading, without replacing a pod")
 		during := podUIDs()
 		patchCompliance(`{"spec":{"compliance":{"standard":"soc2"}}}`)

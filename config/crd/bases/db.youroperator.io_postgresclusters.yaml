@@ -778,6 +778,35 @@ spec:
                 x-kubernetes-list-map-keys:
                 - name
                 x-kubernetes-list-type: map
+              security:
+                description: |-
+                  security hardens the cluster beyond its defaults: a certificate you
+                  supply. Everything in it is off unless set, and changing it replaces the
+                  pods one at a time.
+                properties:
+                  tls:
+                    description: |-
+                      tls makes the database present a certificate you supply, so that a client
+                      can check who it is talking to. Without it the server presents one the
+                      image made, which encrypts the connection and proves nothing.
+                    properties:
+                      secretName:
+                        description: |-
+                          secretName names a Secret in the cluster's namespace with tls.crt (the
+                          certificate, then any intermediates), tls.key and ca.crt, such as one
+                          cert-manager issues. The certificate must be valid for the cluster's
+                          Service, <name>.<namespace>.svc, and for the pods' names under the headless
+                          Service, *.<name>-headless.<namespace>.svc.cluster.local. The operator
+                          checks the certificate against ca.crt before it changes anything, and
+                          connects to the database with that check on. Renewing the certificate in
+                          the Secret needs no restart.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                    required:
+                    - secretName
+                    type: object
+                type: object
               storage:
                 description: storage configures the per-instance persistent volume.
                 properties:
@@ -1069,6 +1098,7 @@ spec:
                   - "ReplicationHealthy": exactly one primary, and every replica is streaming within the lag limit
                   - "FailoverInProgress": there is currently no primary, so a leader election is under way
                   - "ControlsMet": every control of the selected compliance standard is Met
+                  - "TLSReady": the database presents the certificate in spec.security.tls and the operator verified it
 
                   The status of each condition is one of True, False, or Unknown.
                 items:
@@ -1157,6 +1187,33 @@ spec:
                   replicationLagBytes maps each replica pod to how many bytes of WAL it
                   is behind the primary. Pods that are not currently streaming are
                   omitted rather than reported as zero.
+                type: object
+              security:
+                description: security reports what the operator observed about spec.security.
+                properties:
+                  tls:
+                    description: |-
+                      tls is the certificate the primary presented when the operator last
+                      connected to it.
+                    properties:
+                      issuer:
+                        description: issuer is the issuer of the certificate the primary
+                          presented.
+                        type: string
+                      notAfter:
+                        description: notAfter is when the certificate the primary
+                          presented expires.
+                        format: date-time
+                        type: string
+                      verified:
+                        description: |-
+                          verified is true when the operator connected to the primary and the
+                          certificate it presented chained to the CA in the Secret and was valid for
+                          the cluster's Service.
+                        type: boolean
+                    required:
+                    - verified
+                    type: object
                 type: object
             type: object
         required:
