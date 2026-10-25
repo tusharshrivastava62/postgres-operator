@@ -1,0 +1,127 @@
+{
+  "schemaVersion": 1,
+  "cluster": {
+    "namespace": "live13",
+    "name": "orders"
+  },
+  "standard": "hipaa",
+  "source": "file fresh.json",
+  "readAt": "2026-10-25T03:00:00Z",
+  "freshness": "never-checked",
+  "staleAfterSeconds": 2100,
+  "readThisFirst": [
+    "Enabling a preset does not make a cluster compliant with HIPAA, SOC 2, PCI DSS or anything else.",
+    "The mapping from these controls to any regulation has not been reviewed by anyone qualified.",
+    "ControlsMet being True means one thing: every check this operator performs passed the last time it ran. It does not mean your cluster is compliant, secure, or audit-ready. Do not present it to an auditor as proof of compliance.",
+    "pgaudit does not record an escalated session's reads and writes. Read the emergency access section before anyone uses it."
+  ],
+  "summary": {
+    "met": 1,
+    "notMet": 0,
+    "unknown": 9,
+    "outOfDate": 0
+  },
+  "controls": [
+    {
+      "id": "audit-logging",
+      "status": "Unknown",
+      "recorded": "Unknown",
+      "evidence": "waiting for the first compliance check",
+      "observedAt": "2026-10-25T03:37:59Z"
+    },
+    {
+      "id": "connection-logging",
+      "status": "Unknown",
+      "recorded": "Unknown",
+      "evidence": "waiting for the first compliance check",
+      "observedAt": "2026-10-25T03:37:59Z"
+    },
+    {
+      "id": "encryption-in-transit",
+      "status": "Unknown",
+      "recorded": "Unknown",
+      "evidence": "waiting for the first compliance check",
+      "observedAt": "2026-10-25T03:37:59Z"
+    },
+    {
+      "id": "authentication",
+      "status": "Unknown",
+      "recorded": "Unknown",
+      "evidence": "waiting for the first compliance check",
+      "observedAt": "2026-10-25T03:37:59Z"
+    },
+    {
+      "id": "data-integrity",
+      "status": "Unknown",
+      "recorded": "Unknown",
+      "evidence": "waiting for the first compliance check",
+      "observedAt": "2026-10-25T03:37:59Z"
+    },
+    {
+      "id": "audit-log-delivery",
+      "status": "Unknown",
+      "recorded": "Unknown",
+      "evidence": "waiting for the first compliance check",
+      "observedAt": "2026-10-25T03:37:59Z"
+    },
+    {
+      "id": "audit-log-retention",
+      "status": "Unknown",
+      "recorded": "Unknown",
+      "evidence": "waiting for the first compliance check",
+      "observedAt": "2026-10-25T03:37:59Z"
+    },
+    {
+      "id": "network-isolation",
+      "status": "Unknown",
+      "recorded": "Unknown",
+      "evidence": "the policy is in place; waiting for the first enforcement probe",
+      "observedAt": "2026-10-25T03:37:59Z"
+    },
+    {
+      "id": "backup-recovery",
+      "status": "Unknown",
+      "recorded": "Unknown",
+      "evidence": "BackupHealthy is not known yet; RestoreVerified is not known yet",
+      "observedAt": "2026-10-25T03:37:59Z"
+    },
+    {
+      "id": "availability",
+      "status": "Met",
+      "recorded": "Met",
+      "evidence": "3 instances, with a ready primary and replication healthy",
+      "observedAt": "2026-10-25T03:39:06Z"
+    }
+  ],
+  "notChecked": {
+    "intro": "This list is not exhaustive. Anything that is not in the table above is not checked.",
+    "items": [
+      "Everything about people and process.",
+      "Whether the audit is enough.",
+      "That the audit log cannot be altered.",
+      "Retention is not enforced.",
+      "Encryption at rest.",
+      "Certificates.",
+      "The network beyond the database pods.",
+      "Who can do what inside the database.",
+      "Emergency access, if you allow it.",
+      "The cluster around it.",
+      "Changes between checks, and checks that stop."
+    ],
+    "pointer": "docs/compliance.md and docs/emergency-access.md in the operator's repository"
+  },
+  "emergencyAccess": {
+    "enabled": true,
+    "warning": {
+      "title": "WARNING: while you are escalated, your statements and their values are logged in clear text",
+      "statements": [
+        "pgaudit does not record an escalated session's reads and writes.",
+        "While escalated, the server writes every statement you run to its log, and it writes the values you bind to a statement's parameters there too, in clear text.",
+        "This happens whatever the cluster's audit settings say: logParameters: false does not stop it.",
+        "If you are using emergency access as part of an audit, your auditors will be able to read every value you used."
+      ],
+      "record": "These are the requests that exist now. A request that was deleted leaves nothing here. The server log, and the Kubernetes API server's audit log if you keep one, hold the rest of the record."
+    },
+    "requests": []
+  }
+}

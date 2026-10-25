@@ -38,9 +38,12 @@ That push triggers `.github/workflows/release.yml`, which:
 - Packages `charts/postgres-operator` with the chart/app version set to
   `0.2.0` (overriding whatever's in `Chart.yaml`) and pushes it as an OCI
   artifact to `ghcr.io/tusharshrivastava62/charts`.
-- Creates a GitHub Release for the tag, with the packaged chart `.tgz`
-  attached and release notes generated from merged PRs/commits since the
-  last tag.
+- Builds the `pg-compliance` command for linux and darwin on amd64 and
+  arm64, as `pg-compliance_0.2.0_<os>_<arch>.tar.gz` with a
+  `pg-compliance_0.2.0_checksums.txt`. See `docs/compliance-report.md`.
+- Creates a GitHub Release for the tag, with the packaged chart `.tgz`,
+  the `pg-compliance` archives and their checksums attached and release
+  notes generated from merged PRs/commits since the last tag.
 
 ## Installing a released version
 

@@ -18,13 +18,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/tusharshrivastava62/postgres-operator/test/utils"
 )
 
 // clientLabel marks a pod as an application that may connect to a cluster with
@@ -59,6 +63,53 @@ func kubectlIn(stdin string, args ...string) (string, error) {
 			strings.Join(args, " "), errors.Unwrap(err), strings.TrimSpace(stderr.String()))
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// buildPGCompliance builds the pg-compliance command into a directory that is
+// removed when the spec ends, and returns the path to it.
+func buildPGCompliance() string {
+	root, err := utils.GetProjectDir()
+	Expect(err).NotTo(HaveOccurred())
+	dir, err := os.MkdirTemp("", "pg-compliance-")
+	Expect(err).NotTo(HaveOccurred())
+	DeferCleanup(func() { _ = os.RemoveAll(dir) })
+	binary := filepath.Join(dir, "pg-compliance")
+	build := exec.Command("go", "build", "-o", binary, "./cmd/pg-compliance")
+	build.Dir = root
+	out, err := build.CombinedOutput()
+	Expect(err).NotTo(HaveOccurred(), string(out))
+	return binary
+}
+
+// complianceReport is what pg-compliance says about the cluster, as JSON.
+type complianceReport struct {
+	Freshness     string   `json:"freshness"`
+	ReadThisFirst []string `json:"readThisFirst"`
+	Summary       struct {
+		Met, NotMet, Unknown, OutOfDate int
+	} `json:"summary"`
+	Controls []struct {
+		ID, Status string
+	} `json:"controls"`
+	EmergencyAccess struct {
+		Warning  *struct{ Statements []string } `json:"warning"`
+		Requests []struct{ Name, State, RequestedBy, Role string }
+	} `json:"emergencyAccess"`
+}
+
+// readComplianceReport runs the command against the cluster, reading as the
+// current kubeconfig user, and returns the text report and the JSON one.
+func readComplianceReport(binary string) (string, complianceReport, error) {
+	var report complianceReport
+	text, err := exec.Command(binary, "-n", clusterNamespace, clusterName).CombinedOutput()
+	if err != nil {
+		return "", report, fmt.Errorf("pg-compliance: %w: %s", err, text)
+	}
+	raw, err := exec.Command(binary, "-n", clusterNamespace, clusterName, "-o", "json").Output()
+	if err != nil {
+		return "", report, fmt.Errorf("pg-compliance -o json: %w", err)
+	}
+	return string(text), report, json.Unmarshal(raw, &report)
 }
 
 // inCluster is kubectl scoped to the namespace the test clusters live in.

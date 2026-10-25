@@ -13,6 +13,7 @@ package v1alpha1
 import (
 	"slices"
 	"strings"
+	"time"
 )
 
 // The compliance standards a preset exists for.
@@ -25,6 +26,13 @@ const (
 // ConditionControlsMet is true when every control of the selected standard is
 // Met. A control that is Unknown does not count as Met.
 const ConditionControlsMet = "ControlsMet"
+
+// ComplianceStaleAfter is how old a compliance report may be before its
+// results stop being believed: three missed runs of the ten-minute jobs and a
+// little more, as for backups. The operator demotes the results that rest on a
+// report once it is this old, and pg-compliance reads a status older than this
+// as out of date.
+const ComplianceStaleAfter = 35 * time.Minute
 
 // The values of ComplianceControl.Status.
 const (

@@ -2,8 +2,8 @@ name: Release
 
 # Cuts a release from a version tag: builds and pushes the operator image
 # to GHCR (multi-arch), packages and pushes the Helm chart as an OCI
-# artifact to GHCR, and creates a GitHub Release with the packaged chart
-# attached. The tag is the single source of truth for the version - it's
+# artifact to GHCR, and creates a GitHub Release with the packaged chart and
+# the pg-compliance command for linux and darwin attached. The tag is the single source of truth for the version - it's
 # not read from Chart.yaml, so tagging is the one step that actually cuts
 # a release. See RELEASING.md for the full manual flow.
 on:
@@ -72,8 +72,31 @@ jobs:
       - name: Push the Helm chart
         run: helm push "dist/postgres-operator-${{ steps.version.outputs.version }}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
 
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build pg-compliance
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            stage="$(mktemp -d)"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
+              -ldflags "-X main.version=${VERSION}" -o "${stage}/pg-compliance" ./cmd/pg-compliance
+            tar -C "$stage" -czf "dist/pg-compliance_${VERSION}_${os}_${arch}.tar.gz" pg-compliance
+          done
+          (cd dist && sha256sum pg-compliance_*.tar.gz > "pg-compliance_${VERSION}_checksums.txt")
+
       - name: Create the GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           generate_release_notes: true
-          files: dist/postgres-operator-${{ steps.version.outputs.version }}.tgz
+          files: |
+            dist/postgres-operator-${{ steps.version.outputs.version }}.tgz
+            dist/pg-compliance_${{ steps.version.outputs.version }}_*.tar.gz
+            dist/pg-compliance_${{ steps.version.outputs.version }}_checksums.txt

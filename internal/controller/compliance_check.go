@@ -55,8 +55,8 @@ const (
 	complianceCheckSchedule = "*/10 * * * *"
 
 	// complianceStaleAfter is how old a report may be before its controls stop
-	// being believed: three missed runs and a little more, as for backups.
-	complianceStaleAfter = 35 * time.Minute
+	// being believed.
+	complianceStaleAfter = dbv1alpha1.ComplianceStaleAfter
 
 	// probeTimeoutSeconds is how long the probe waits for a connection.
 	probeTimeoutSeconds = "5"

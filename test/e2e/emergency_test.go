@@ -267,6 +267,23 @@ select reset_user();`)
 	EventuallyWithOffset(1, requestState(request+"-off"), 3*time.Minute, pollEvery).Should(Equal("Revoked"))
 	ExpectWithOffset(1, roleCount(primary, offRole)).To(Equal("0"))
 
+	By("reporting the requests that remain, with what emergency access leaves out of the audit record")
+	text, report, err := readComplianceReport(buildPGCompliance())
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	ExpectWithOffset(1, report.EmergencyAccess.Warning).NotTo(BeNil(), "the cluster no longer allows it, but requests remain")
+	states := map[string]string{}
+	for _, r := range report.EmergencyAccess.Requests {
+		states[r.Name] = r.State
+		ExpectWithOffset(1, r.RequestedBy).NotTo(BeEmpty(), "%s: the API server's record of who asked", r.Name)
+		ExpectWithOffset(1, r.Role).To(HavePrefix("bg_"))
+	}
+	ExpectWithOffset(1, states).To(And(HaveKeyWithValue(request, "Expired"), HaveKeyWithValue(request+"-off", "Revoked")))
+	ExpectWithOffset(1, states).NotTo(HaveKey(request+"-del"), "a deleted request leaves nothing in the report")
+	flat := strings.Join(strings.Fields(text), " ")
+	ExpectWithOffset(1, flat).To(And(
+		ContainSubstring("pgaudit does not record an escalated session's reads and writes."),
+		ContainSubstring("in clear text.")))
+
 	By("leaving no emergency role behind")
 	ExpectWithOffset(1, asSuperuserIn(primary, "postgres", "select count(*) from pg_roles where rolname like 'bg\\_%'")).To(Equal("0"))
 }

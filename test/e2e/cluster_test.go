@@ -1368,6 +1368,20 @@ print(append_extensions('bg_mon,pg_stat_statements,pgextwlist,pg_auth_mon,set_us
 		Expect(state.Controls["audit-log-retention"].Evidence).To(ContainSubstring("not protected from deletion"),
 			"the store has no object lock, and says so")
 
+		By("printing the same result as a report, with what it does not mean in it")
+		pgCompliance := buildPGCompliance()
+		text, report, err := readComplianceReport(pgCompliance)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(report.Freshness).To(Equal("current"))
+		Expect(report.Controls).To(HaveLen(10))
+		Expect(report.Summary.Met).To(Equal(10))
+		flat := strings.Join(strings.Fields(text), " ")
+		Expect(flat).To(And(
+			ContainSubstring("Enabling a preset does not make a cluster compliant"),
+			ContainSubstring("ControlsMet being True means one thing: every check this operator performs passed the last time it ran"),
+			ContainSubstring("Emergency access is off for this cluster, and no requests exist.")))
+		Expect(report.EmergencyAccess.Warning).To(BeNil(), "nothing to warn about while emergency access has never been on")
+
 		By("noticing a role whose password is not stored as scram")
 		_, err = psql(primary, "", "set password_encryption = 'md5'; create role e2e_weak login password 'x'")
 		Expect(err).NotTo(HaveOccurred())
@@ -1383,6 +1397,10 @@ print(append_extensions('bg_mon,pg_stat_statements,pgextwlist,pg_auth_mon,set_us
 		Expect(state.MetStatus).To(Equal("False"))
 		Expect(state.MetMessage).To(ContainSubstring("authentication"))
 		Expect(state.Controls["audit-logging"].Status).To(Equal("Met"), "and only what is wrong is reported")
+		_, report, err = readComplianceReport(pgCompliance)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(report.Summary.NotMet).To(Equal(1), "the report agrees with the status")
+		Expect(report.Summary.Met).To(Equal(9))
 
 		By("seeing it fixed")
 		_, err = psql(primary, "", "drop role e2e_weak")

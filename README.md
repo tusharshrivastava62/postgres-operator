@@ -142,7 +142,8 @@ regulation has not been reviewed by anyone qualified, which is why none is cited
 ran. It says nothing about people and process, about encryption at rest, about whether the audit
 log can be altered, about whether the audit is enough for your obligations, or about anything
 else the operator does not check. [`docs/compliance.md`](docs/compliance.md) lists what is
-checked and, at length, what is not.
+checked and, at length, what is not. [`pg-compliance`](docs/compliance-report.md) prints the
+status as a report with that same wording in it.
 
 ## What it's *not*: a data-loss shortcut
 
@@ -264,11 +265,12 @@ kubectl run psql --rm -it --restart=Never --image=postgres:17 -- \
 | Path | What's there |
 |---|---|
 | `api/v1alpha1/` | The `PostgresCluster` and `PostgresEmergencyAccess` CRD types |
+| `cmd/pg-compliance/`, `internal/compliancereport/` | The `pg-compliance` command, which prints a cluster's compliance status and emergency access requests as a report |
 | `internal/controller/` | The reconciler, status logic, and custom metrics |
 | `internal/webhook/v1alpha1/` | The admission webhooks: validating for both kinds, and one that records who made an emergency access request |
 | `config/` | Raw kustomize manifests (CRD, RBAC, manager, webhook, cert-manager) |
 | `charts/postgres-operator/` | The Helm chart (see its own README for the `crds/` caveat) |
-| `docs/` | Backup and restore runbook; the compliance guide, with what a preset does and does not do; the access control guide; emergency access, with its warning |
+| `docs/` | Backup and restore runbook; the compliance guide, with what a preset does and does not do; the access control guide; emergency access, with its warning; the compliance report |
 | `images/` | The pinned upstream Spilo release and the workflow inputs for the database images |
 | `test/e2e/` | End-to-end tests that deploy the full stack into a real Kind cluster and break real clusters |
 

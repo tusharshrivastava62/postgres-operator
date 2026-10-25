@@ -1,0 +1,251 @@
+{
+  "apiVersion": "db.youroperator.io/v1alpha1",
+  "kind": "PostgresCluster",
+  "metadata": {
+    "creationTimestamp": "2026-10-25T03:37:59Z",
+    "generation": 1,
+    "name": "orders",
+    "namespace": "live13",
+    "resourceVersion": "1393274",
+    "uid": "b447e002-b600-40ca-9779-f8ac9581b48a"
+  },
+  "spec": {
+    "backup": {
+      "destination": {
+        "bucket": "pgbackups",
+        "credentialsSecret": "backup-s3",
+        "endpoint": "http://s3.e2e-s3.svc.cluster.local:8333",
+        "forcePathStyle": true,
+        "type": "s3"
+      },
+      "enabled": true,
+      "encryption": {
+        "keySecret": "backup-key"
+      },
+      "retention": {
+        "days": 1,
+        "full": 2
+      },
+      "schedule": "*/2 * * * *",
+      "verification": {
+        "enabled": true,
+        "schedule": "0 4 * * 0"
+      }
+    },
+    "compliance": {
+      "auditLogs": {
+        "destination": {
+          "bucket": "auditlogs",
+          "credentialsSecret": "backup-s3",
+          "endpoint": "http://s3.e2e-s3.svc.cluster.local:8333",
+          "forcePathStyle": true,
+          "type": "s3"
+        },
+        "logParameters": false
+      },
+      "standard": "hipaa"
+    },
+    "emergencyAccess": {
+      "enabled": true,
+      "maxDuration": "1h"
+    },
+    "ha": {
+      "failoverTimeout": 30,
+      "maximumLagOnFailover": 1048576,
+      "synchronousMode": false
+    },
+    "instances": 3,
+    "resources": {
+      "limits": {
+        "memory": "1Gi"
+      },
+      "requests": {
+        "cpu": "100m",
+        "memory": "256Mi"
+      }
+    },
+    "roles": [
+      {
+        "database": "orders",
+        "name": "app_orders"
+      }
+    ],
+    "storage": {
+      "size": "1Gi"
+    },
+    "version": "17"
+  },
+  "status": {
+    "accessControl": {
+      "credentials": {
+        "lastRotated": "2026-10-25T03:37:59Z",
+        "state": "Idle"
+      },
+      "monitorRole": {
+        "lastRotated": "2026-10-25T03:37:59Z",
+        "name": "pgoperator_monitor",
+        "secretName": "orders-monitor",
+        "state": "Ready"
+      },
+      "roles": [
+        {
+          "lastRotated": "2026-10-25T03:37:59Z",
+          "name": "app_orders",
+          "secretName": "orders-role-app-orders",
+          "state": "Ready"
+        }
+      ]
+    },
+    "compliance": {
+      "controls": [
+        {
+          "evidence": "waiting for the first compliance check",
+          "id": "audit-logging",
+          "observedAt": "2026-10-25T03:37:59Z",
+          "status": "Unknown"
+        },
+        {
+          "evidence": "waiting for the first compliance check",
+          "id": "connection-logging",
+          "observedAt": "2026-10-25T03:37:59Z",
+          "status": "Unknown"
+        },
+        {
+          "evidence": "waiting for the first compliance check",
+          "id": "encryption-in-transit",
+          "observedAt": "2026-10-25T03:37:59Z",
+          "status": "Unknown"
+        },
+        {
+          "evidence": "waiting for the first compliance check",
+          "id": "authentication",
+          "observedAt": "2026-10-25T03:37:59Z",
+          "status": "Unknown"
+        },
+        {
+          "evidence": "waiting for the first compliance check",
+          "id": "data-integrity",
+          "observedAt": "2026-10-25T03:37:59Z",
+          "status": "Unknown"
+        },
+        {
+          "evidence": "waiting for the first compliance check",
+          "id": "audit-log-delivery",
+          "observedAt": "2026-10-25T03:37:59Z",
+          "status": "Unknown"
+        },
+        {
+          "evidence": "waiting for the first compliance check",
+          "id": "audit-log-retention",
+          "observedAt": "2026-10-25T03:37:59Z",
+          "status": "Unknown"
+        },
+        {
+          "evidence": "the policy is in place; waiting for the first enforcement probe",
+          "id": "network-isolation",
+          "observedAt": "2026-10-25T03:37:59Z",
+          "status": "Unknown"
+        },
+        {
+          "evidence": "BackupHealthy is not known yet; RestoreVerified is not known yet",
+          "id": "backup-recovery",
+          "observedAt": "2026-10-25T03:37:59Z",
+          "status": "Unknown"
+        },
+        {
+          "evidence": "3 instances, with a ready primary and replication healthy",
+          "id": "availability",
+          "observedAt": "2026-10-25T03:39:06Z",
+          "status": "Met"
+        }
+      ],
+      "standard": "hipaa"
+    },
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-10-25T03:38:08Z",
+        "message": "primary is orders-0",
+        "reason": "PrimaryReady",
+        "status": "True",
+        "type": "Available"
+      },
+      {
+        "lastTransitionTime": "2026-10-25T03:39:06Z",
+        "message": "3/3 instances ready",
+        "reason": "ReconcileComplete",
+        "status": "False",
+        "type": "Progressing"
+      },
+      {
+        "lastTransitionTime": "2026-10-25T03:39:06Z",
+        "message": "2 replica(s) streaming within the lag limit",
+        "reason": "ReplicasStreaming",
+        "status": "True",
+        "type": "ReplicationHealthy"
+      },
+      {
+        "lastTransitionTime": "2026-10-25T03:37:59Z",
+        "message": "a primary is serving",
+        "reason": "PrimaryAvailable",
+        "status": "False",
+        "type": "FailoverInProgress"
+      },
+      {
+        "lastTransitionTime": "2026-10-25T03:37:59Z",
+        "message": "no recent backup status check has reported",
+        "reason": "BackupNotObserved",
+        "status": "Unknown",
+        "type": "Degraded"
+      },
+      {
+        "lastTransitionTime": "2026-10-25T03:37:59Z",
+        "message": "waiting for the first backup status check",
+        "reason": "NotObserved",
+        "status": "Unknown",
+        "type": "BackupHealthy"
+      },
+      {
+        "lastTransitionTime": "2026-10-25T03:37:59Z",
+        "message": "waiting for the first backup status check",
+        "reason": "NotObserved",
+        "status": "Unknown",
+        "type": "WALArchivingHealthy"
+      },
+      {
+        "lastTransitionTime": "2026-10-25T03:37:59Z",
+        "message": "waiting for the first restore test",
+        "reason": "NotRunYet",
+        "status": "Unknown",
+        "type": "RestoreVerified"
+      },
+      {
+        "lastTransitionTime": "2026-10-25T03:39:06Z",
+        "message": "9 of 10 controls are not yet known: audit-logging, connection-logging, encryption-in-transit, authentication, data-integrity, audit-log-delivery, audit-log-retention, network-isolation, backup-recovery",
+        "reason": "ControlsNotObserved",
+        "status": "Unknown",
+        "type": "ControlsMet"
+      },
+      {
+        "lastTransitionTime": "2026-10-25T03:38:07Z",
+        "message": "1 roles are ready",
+        "reason": "AllRolesReady",
+        "status": "True",
+        "type": "RolesReady"
+      },
+      {
+        "lastTransitionTime": "2026-10-25T03:37:59Z",
+        "message": "no emergency access is active",
+        "reason": "NoActiveGrants",
+        "status": "False",
+        "type": "EmergencyAccessActive"
+      }
+    ],
+    "image": "ghcr.io/tusharshrivastava62/spilo-17:4.1-p2-r1",
+    "observedGeneration": 1,
+    "primaryInstance": "orders-0",
+    "replicationLagBytes": {
+      "orders-1": 0,
+      "orders-2": 0
+    }
+  }
+}

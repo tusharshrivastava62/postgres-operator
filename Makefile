@@ -115,6 +115,13 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
 
+# The version pg-compliance reports. The release workflow sets it from the tag.
+CLI_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+
+.PHONY: build-cli
+build-cli: fmt vet ## Build the pg-compliance command.
+	go build -ldflags "-X main.version=$(CLI_VERSION)" -o bin/pg-compliance ./cmd/pg-compliance
+
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go

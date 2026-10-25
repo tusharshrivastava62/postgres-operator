@@ -154,6 +154,9 @@ kubectl get postgrescluster <name> \
 - The metric `postgrescluster_compliance_controls{namespace,cluster,status}` counts the controls
   in each state. Alert on `status="NotMet"` above zero for fifteen minutes, and on `Unknown` for
   more than an hour, which means the jobs are not reporting.
+- `pg-compliance` prints all of this, with the emergency access requests, as a report a person
+  can read, and says when the newest report is too old to believe, which the status itself cannot
+  say when the operator has stopped. See [compliance-report.md](compliance-report.md).
 
 ## What the operator cannot check
 

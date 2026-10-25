@@ -1,0 +1,72 @@
+# PostgreSQL compliance report
+
+| | |
+|---|---|
+| Cluster | `live13/orders` |
+| Preset | `hipaa` |
+| Checked | never |
+| Read | 2026-10-25 03:00:00 UTC |
+| Source | file fresh.json |
+
+> **NOT CHECKED YET.** The operator's jobs have not reported for this cluster, so every result that rests on them is Unknown. A result the operator reads from its own status may already be shown.
+
+## Read this first
+
+> Enabling a preset does not make a cluster compliant with HIPAA, SOC 2, PCI DSS or anything else.
+
+> The mapping from these controls to any regulation has not been reviewed by anyone qualified.
+
+> ControlsMet being True means one thing: every check this operator performs passed the last time it ran. It does not mean your cluster is compliant, secure, or audit-ready. Do not present it to an auditor as proof of compliance.
+
+> pgaudit does not record an escalated session's reads and writes. Read the emergency access section before anyone uses it.
+
+## The operator's own checks
+
+1 met, 0 not met, 9 unknown, 0 out of date
+
+| Result | Control | Evidence |
+|---|---|---|
+| Unknown | `audit-logging` | waiting for the first compliance check |
+| Unknown | `connection-logging` | waiting for the first compliance check |
+| Unknown | `encryption-in-transit` | waiting for the first compliance check |
+| Unknown | `authentication` | waiting for the first compliance check |
+| Unknown | `data-integrity` | waiting for the first compliance check |
+| Unknown | `audit-log-delivery` | waiting for the first compliance check |
+| Unknown | `audit-log-retention` | waiting for the first compliance check |
+| Unknown | `network-isolation` | the policy is in place; waiting for the first enforcement probe |
+| Unknown | `backup-recovery` | BackupHealthy is not known yet; RestoreVerified is not known yet |
+| Met | `availability` | 3 instances, with a ready primary and replication healthy |
+
+## Not checked by the operator
+
+This list is not exhaustive. Anything that is not in the table above is not checked.
+
+- Everything about people and process.
+- Whether the audit is enough.
+- That the audit log cannot be altered.
+- Retention is not enforced.
+- Encryption at rest.
+- Certificates.
+- The network beyond the database pods.
+- Who can do what inside the database.
+- Emergency access, if you allow it.
+- The cluster around it.
+- Changes between checks, and checks that stop.
+
+The full lists are in docs/compliance.md and docs/emergency-access.md in the operator's repository.
+
+## Emergency access
+
+> **WARNING: while you are escalated, your statements and their values are logged in clear text**
+>
+> pgaudit does not record an escalated session's reads and writes.
+>
+> While escalated, the server writes every statement you run to its log, and it writes the values you bind to a statement's parameters there too, in clear text.
+>
+> This happens whatever the cluster's audit settings say: logParameters: false does not stop it.
+>
+> If you are using emergency access as part of an audit, your auditors will be able to read every value you used.
+
+These are the requests that exist now. A request that was deleted leaves nothing here. The server log, and the Kubernetes API server's audit log if you keep one, hold the rest of the record.
+
+No requests exist.
