@@ -547,8 +547,8 @@ var _ = Describe("The monitor role", func() {
 			in.rotatingCredentials = true
 			Expect(refreshDelay(in)).To(Equal(unhealthyRefreshInterval), "the superuser and replication passwords are being replaced")
 			in = well
-			in.tlsChanged = true
-			Expect(refreshDelay(in)).To(Equal(unhealthyRefreshInterval), "the jobs are due to start or stop checking the certificate")
+			in.certificatePending = true
+			Expect(refreshDelay(in)).To(Equal(unhealthyRefreshInterval), "a certificate is about to change")
 		})
 		It("is soonest during a rolling update", func() {
 			in := well

@@ -27,15 +27,22 @@ const (
 	tlsServer    = clusterName + "." + clusterNamespace + ".svc"
 	tlsFileCheck = `python3 - <<'PY'
 import hashlib, socket, ssl, struct, subprocess
-sock = socket.create_connection((subprocess.check_output(["hostname", "-i"]).decode().split()[0], 5432), timeout=5)
-sock.sendall(struct.pack("!II", 8, 80877103))
-assert sock.recv(1) == b"S"
+ip = subprocess.check_output(["hostname", "-i"]).decode().split()[0]
 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 ctx.check_hostname = False
 ctx.verify_mode = ssl.CERT_NONE
-served = hashlib.sha256(ctx.wrap_socket(sock).getpeercert(binary_form=True)).hexdigest()[:16]
+def fingerprint(sock):
+    return hashlib.sha256(ctx.wrap_socket(sock).getpeercert(binary_form=True)).hexdigest()[:16]
+sock = socket.create_connection((ip, 5432), timeout=5)
+sock.sendall(struct.pack("!II", 8, 80877103))
+assert sock.recv(1) == b"S"
+served = fingerprint(sock)
+try:
+    api = fingerprint(socket.create_connection((ip, 8008), timeout=5))
+except Exception:
+    api = "none"
 first = open("/tls/tls.crt").read().split("-----END CERTIFICATE-----")[0] + "-----END CERTIFICATE-----"
-print(served, hashlib.sha256(ssl.PEM_cert_to_DER_cert(first)).hexdigest()[:16])
+print(served, hashlib.sha256(ssl.PEM_cert_to_DER_cert(first)).hexdigest()[:16], api)
 PY`
 )
 
@@ -80,12 +87,21 @@ spec:
 // servedAndMounted says what the primary presents and what its mounted
 // certificate is, as short fingerprints: the same once the server has picked up
 // the file.
-func servedAndMounted(pod string) (served, mounted string) {
+func servedAndMounted(pod string) (served, mounted, api string) {
 	out, err := runInPod(pod, tlsFileCheck)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 	fields := strings.Fields(out)
-	ExpectWithOffset(1, fields).To(HaveLen(2), out)
-	return fields[0], fields[1]
+	ExpectWithOffset(1, fields).To(HaveLen(3), out)
+	return fields[0], fields[1], fields[2]
+}
+
+// apiStatus is the status code Patroni's API answers a request from a pod with,
+// or 000 when it does not answer. It is made from inside the cluster, to the pod
+// at ip, as anyone who could reach port 8008 could make it.
+func apiStatus(from, scheme, ip, method, path, password string) string {
+	script := `curl -sk -m 5 -o /dev/null -w '%{http_code}' -X "$1" ${5:+-u "operator:$5"} -H 'Content-Type: application/json' -d '{}' "$2://$3:8008$4" || true`
+	out, _ := runInPod(from, script, method, scheme, ip, path, password)
+	return strings.TrimSpace(out)
 }
 
 // tlsScenario gives the main cluster a certificate from cert-manager, and checks
@@ -157,16 +173,89 @@ func tlsScenario(healthy func(Gomega), podUIDs func() string) {
 		}
 	}, 3*time.Minute, pollEvery).Should(Succeed())
 
+	By("asking for Patroni's API to need a password and to answer over TLS: every pod is replaced to start that way")
+	beforeAPI := podUIDs()
+	_, err = inCluster("patch", "postgrescluster", clusterName, "--type=merge", "-p",
+		fmt.Sprintf(`{"spec":{"security":{"tls":{"secretName":%q,"patroniAPI":true},"patroniAPI":{"authentication":true}}}}`, tlsSecret))
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	EventuallyWithOffset(1, func(g Gomega) {
+		for uid := range strings.FieldsSeq(beforeAPI) {
+			g.Expect(podUIDs()).NotTo(ContainSubstring(uid), "every pod was replaced")
+		}
+		started, err := clusterField(".status.security.patroniAPI")
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(started).To(Equal(`{"authenticated":true,"tls":true}`), "the primary was started that way")
+		healthy(g)
+	}, clusterUpTimeout+5*time.Minute, pollEvery).Should(Succeed())
+
+	By("seeing that it reads for anyone, changes things only for whoever has the password, and speaks TLS only")
+	primary = primaryNow()
+	replica, err := inCluster("get", "pods", "-l", "db.youroperator.io/role=replica", "-o", "jsonpath={.items[0].metadata.name}")
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	ip, err = inCluster("get", "pod", primary, "-o", "jsonpath={.status.podIP}")
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	password, err := secretValue(clusterName+"-credentials", "patroni-api-password")
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	ExpectWithOffset(1, password).To(HavePrefix("pw"))
+	ExpectWithOffset(1, apiStatus(replica, "http", ip, "GET", "/health", "")).To(Equal("000"), "plain HTTP is not served")
+	ExpectWithOffset(1, apiStatus(replica, "https", ip, "GET", "/health", "")).To(Equal("200"), "reading is open: the kubelet needs it")
+	ExpectWithOffset(1, apiStatus(replica, "https", ip, "GET", "/config", "")).To(Equal("200"))
+	ExpectWithOffset(1, apiStatus(replica, "https", ip, "POST", "/reload", "")).To(Equal("401"), "anyone could reload without the password")
+	ExpectWithOffset(1, apiStatus(replica, "https", ip, "PATCH", "/config", "wrong")).To(Equal("401"))
+	ExpectWithOffset(1, apiStatus(replica, "https", ip, "PATCH", "/config", "")).To(Equal("401"))
+	ExpectWithOffset(1, apiStatus(replica, "https", ip, "POST", "/reload", password)).To(Equal("202"), "with it, it is accepted")
+	template, err := inCluster("get", "statefulset", clusterName, "-o", "jsonpath={.spec.template}")
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	ExpectWithOffset(1, template).NotTo(ContainSubstring(password), "the password is in the Secret and not in the pod's spec")
+
+	By("seeing the operator go on managing Patroni through it: a change to spec.ha reaches the running cluster")
+	_, err = inCluster("patch", "postgrescluster", clusterName, "--type=merge", "-p", `{"spec":{"ha":{"failoverTimeout":45}}}`)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	EventuallyWithOffset(1, func() (string, error) {
+		return runInPod(replica, `curl -sk -m 5 "https://$1:8008/config" | python3 -c "import json,sys; print(json.load(sys.stdin)['ttl'])"`, ip)
+	}, 3*time.Minute, pollEvery).Should(Equal("45"))
+
+	By("replacing the password with the others: the pods are replaced to start with it, and the operator is answered meanwhile")
+	beforeRotation := podUIDs()
+	_, err = inCluster("annotate", "secret", clusterName+"-credentials", "db.youroperator.io/rotate=e2e-api-1", "--overwrite")
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	EventuallyWithOffset(1, func(g Gomega) {
+		for uid := range strings.FieldsSeq(beforeRotation) {
+			g.Expect(podUIDs()).NotTo(ContainSubstring(uid), "every pod was replaced")
+		}
+		g.Expect(clusterCondition("Available")).To(Equal("True"))
+		state, err := clusterField(".status.accessControl.credentials.state")
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(state).To(Equal("Idle"))
+		keys, err := inCluster("get", "secret", clusterName+"-credentials", "-o", "jsonpath={.data}")
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(keys).NotTo(ContainSubstring("patroni-api-password-previous"), "the old one is dropped once every pod has the new")
+		healthy(g)
+	}, 2*clusterUpTimeout, pollEvery).Should(Succeed())
+	replaced, err := secretValue(clusterName+"-credentials", "patroni-api-password")
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	ExpectWithOffset(1, replaced).NotTo(Equal(password))
+	primary = primaryNow()
+	replica, err = inCluster("get", "pods", "-l", "db.youroperator.io/role=replica", "-o", "jsonpath={.items[0].metadata.name}")
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	ip, err = inCluster("get", "pod", primary, "-o", "jsonpath={.status.podIP}")
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	ExpectWithOffset(1, apiStatus(replica, "https", ip, "POST", "/reload", password)).To(Equal("401"), "the old password no longer works")
+	ExpectWithOffset(1, apiStatus(replica, "https", ip, "POST", "/reload", replaced)).To(Equal("202"))
+
 	By("renewing the certificate: the server presents the new one without a pod being replaced")
-	servedBefore, mountedBefore := servedAndMounted(primary)
+	primary = primaryNow()
+	servedBefore, mountedBefore, apiBefore := servedAndMounted(primary)
 	ExpectWithOffset(1, servedBefore).To(Equal(mountedBefore))
+	ExpectWithOffset(1, apiBefore).To(Equal(mountedBefore))
 	uids := podUIDs()
 	_, err = inCluster("delete", "secret", tlsSecret)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 	EventuallyWithOffset(1, func(g Gomega) {
-		served, mounted := servedAndMounted(primary)
+		served, mounted, api := servedAndMounted(primary)
 		g.Expect(mounted).NotTo(Equal(mountedBefore), "cert-manager made a new certificate and the pod has it")
 		g.Expect(served).To(Equal(mounted), "and the server presents it")
+		g.Expect(api).To(Equal(mounted), "and so does Patroni's API, which the operator asked to reload")
 	}, 10*time.Minute, 10*time.Second).Should(Succeed())
 	ExpectWithOffset(1, podUIDs()).To(Equal(uids), "no pod was replaced")
 	EventuallyWithOffset(1, func() (string, error) { return conditionStatus("TLSReady") }, 3*time.Minute, pollEvery).Should(Equal("True"))
@@ -185,6 +274,16 @@ func tlsScenario(healthy func(Gomega), podUIDs func() string) {
 		g.Expect(out).To(BeEmpty())
 	}, clusterUpTimeout+5*time.Minute, pollEvery).Should(Succeed())
 	ExpectWithOffset(1, clusterCondition("TLSReady")).To(BeEmpty(), "nothing to report once it is not asked for")
+	primary = primaryNow()
+	replica, err = inCluster("get", "pods", "-l", "db.youroperator.io/role=replica", "-o", "jsonpath={.items[0].metadata.name}")
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	ip, err = inCluster("get", "pod", primary, "-o", "jsonpath={.status.podIP}")
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	ExpectWithOffset(1, apiStatus(replica, "http", ip, "GET", "/health", "")).To(Equal("200"), "Patroni's API is back to plain HTTP")
+	ExpectWithOffset(1, apiStatus(replica, "http", ip, "POST", "/reload", "")).To(Equal("202"), "and asks for no password")
+	started, err := clusterField(".status.security")
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	ExpectWithOffset(1, started).To(BeEmpty())
 	_, err = inCluster("get", "configmap", clusterName+"-tls-ca")
 	ExpectWithOffset(1, err).To(HaveOccurred(), "the CA goes with it")
 	mode, err := inCluster("get", "cronjob", clusterName+"-compliance-check", "-o",

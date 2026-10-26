@@ -264,11 +264,9 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, fmt.Errorf("syncing patroni configuration: %w", err)
 	}
 
-	// Needs a primary too, and decides whether the jobs check its certificate.
-	// They are given the CA on the next look, so when that changes look soon.
-	tlsChanged, err := r.reconcileTLSStatus(ctx, cluster)
+	certificatePending, err := r.reconcileSecurity(ctx, cluster)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("checking the database's certificate: %w", err)
+		return ctrl.Result{}, err
 	}
 
 	// Needs a primary, and so comes after everything that creates one. A role
@@ -299,7 +297,7 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	return ctrl.Result{RequeueAfter: refreshDelay(refreshInputs{
 		rolling: rolling, synced: synced, healthy: view.healthy,
 		monitorReady: monitorReady, rolesReady: rolesReady, rotatingCredentials: rotatingCredentials,
-		tlsChanged: tlsChanged,
+		certificatePending: certificatePending,
 	})}, nil
 }
 
@@ -342,9 +340,11 @@ type refreshInputs struct {
 	// rotatingCredentials is whether the superuser and replication passwords
 	// are being replaced, or are due and waiting to be.
 	rotatingCredentials bool
-	// tlsChanged is whether the jobs are due to start or stop checking the
-	// database's certificate, which takes another look.
-	tlsChanged bool
+	// certificatePending is whether something about a certificate is about to
+	// change, and wants another look soon: the jobs are due to start or stop
+	// checking the database's, or a member was asked to reload the one its API
+	// presents.
+	certificatePending bool
 }
 
 // refreshDelay is how long to wait before looking at a cluster again: soon
@@ -354,7 +354,7 @@ func refreshDelay(in refreshInputs) time.Duration {
 	switch {
 	case in.rolling:
 		return rolloutRequeueDelay
-	case !in.synced || !in.healthy || !in.monitorReady || !in.rolesReady || in.rotatingCredentials || in.tlsChanged:
+	case !in.synced || !in.healthy || !in.monitorReady || !in.rolesReady || in.rotatingCredentials || in.certificatePending:
 		return unhealthyRefreshInterval
 	}
 	return healthyRefreshInterval
@@ -454,25 +454,29 @@ func (r *PostgresClusterReconciler) reconcileSecret(ctx context.Context, cluster
 			},
 			Type: corev1.SecretTypeOpaque,
 		}
-		if err := fillMissingCredentials(existing); err != nil {
+		if err := fillMissingCredentials(existing, cluster); err != nil {
 			return err
 		}
 		return r.Create(ctx, existing)
 	}
 
 	patch := client.MergeFrom(existing.DeepCopy())
-	if !missingCredentials(existing) {
+	if !missingCredentials(existing, cluster) {
 		return nil
 	}
-	if err := fillMissingCredentials(existing); err != nil {
+	if err := fillMissingCredentials(existing, cluster); err != nil {
 		return err
 	}
 	return r.Patch(ctx, existing, patch)
 }
 
 // missingCredentials reports whether any key the cluster needs is absent.
-func missingCredentials(secret *corev1.Secret) bool {
-	for _, key := range []string{secretKeyUsername, secretKeyPassword, secretKeyReplicationPassword} {
+func missingCredentials(secret *corev1.Secret, cluster *dbv1alpha1.PostgresCluster) bool {
+	keys := []string{secretKeyUsername, secretKeyPassword, secretKeyReplicationPassword}
+	if apiAuthenticationOn(cluster) {
+		keys = append(keys, secretKeyPatroniAPI)
+	}
+	for _, key := range keys {
 		if _, ok := secret.Data[key]; !ok {
 			return true
 		}
@@ -482,7 +486,7 @@ func missingCredentials(secret *corev1.Secret) bool {
 
 // fillMissingCredentials adds whichever of the credential keys are absent,
 // and only those.
-func fillMissingCredentials(secret *corev1.Secret) error {
+func fillMissingCredentials(secret *corev1.Secret, cluster *dbv1alpha1.PostgresCluster) error {
 	if secret.Data == nil {
 		secret.Data = map[string][]byte{}
 	}
@@ -498,6 +502,16 @@ func fillMissingCredentials(secret *corev1.Secret) error {
 			return fmt.Errorf("generating %s: %w", key, err)
 		}
 		secret.Data[key] = []byte(password)
+	}
+	// The API password is made only for a cluster that asks for it, and kept
+	// after it stops asking, so that asking again finds the pods and the Secret
+	// agreeing.
+	if _, ok := secret.Data[secretKeyPatroniAPI]; !ok && apiAuthenticationOn(cluster) {
+		password, err := generateAPIPassword()
+		if err != nil {
+			return fmt.Errorf("generating %s: %w", secretKeyPatroniAPI, err)
+		}
+		secret.Data[secretKeyPatroniAPI] = []byte(password)
 	}
 	return nil
 }

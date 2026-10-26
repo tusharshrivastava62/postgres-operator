@@ -321,6 +321,24 @@ var _ = Describe("Rolling update through the reconciler", func() {
 		Expect(podExists(name + "-0")).To(BeTrue())
 	})
 
+	It("hands leadership over with the Patroni API password, when the cluster has one", func() {
+		const name = "roll-password"
+		setup(name, 3, map[string]string{name + "-0": oldRevision, name + "-1": newRevision, name + "-2": newRevision})
+		secret := &corev1.Secret{}
+		Expect(k8sClient.Get(ctx, key(name+"-credentials"), secret)).To(Succeed())
+		secret.Data[secretKeyPatroniAPI] = []byte("pw-for-the-api")
+		Expect(k8sClient.Update(ctx, secret)).To(Succeed())
+		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, secret))).To(Succeed()) })
+
+		reconcileOnce(name)
+		Expect(fake.switchovers).To(ConsistOf(name + "-0->" + name + "-1"))
+		Expect(fake.targets).NotTo(BeEmpty())
+		for _, target := range fake.targets {
+			Expect(target.Username).To(Equal("operator"))
+			Expect(target.Passwords).To(Equal([]string{"pw-for-the-api"}), "every call to Patroni carries it, the switchover too")
+		}
+	})
+
 	It("switches leadership to an updated replica, and deletes no pod, when only the primary is outdated", func() {
 		const name = "roll-switch"
 		setup(name, 3, map[string]string{name + "-0": oldRevision, name + "-1": newRevision, name + "-2": newRevision})

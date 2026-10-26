@@ -91,7 +91,15 @@ func tlsCAConfigMapName(cluster *dbv1alpha1.PostgresCluster) string { return clu
 // by. An expired certificate is not a problem here, since nothing the operator
 // would change makes it worse.
 func readTLS(ctx context.Context, reader client.Reader, cluster *dbv1alpha1.PostgresCluster, now time.Time) (*tlsMaterial, string, error) {
-	name := cluster.Spec.Security.TLSSecretName()
+	return readTLSSecret(ctx, reader, cluster, cluster.Spec.Security.TLSSecretName(), now)
+}
+
+// readTLSSecret is readTLS for a named Secret, which is not always the one the
+// cluster names now: a pod that is yet to be replaced serves the one it was
+// started with.
+func readTLSSecret(
+	ctx context.Context, reader client.Reader, cluster *dbv1alpha1.PostgresCluster, name string, now time.Time,
+) (*tlsMaterial, string, error) {
 	if name == "" {
 		return nil, "", nil
 	}
@@ -173,6 +181,17 @@ func (r *PostgresClusterReconciler) holdBackForSecurity(ctx context.Context, clu
 	}
 	log.Info("not reconciling: " + problem)
 	return ctrl.Result{RequeueAfter: tlsRecheckDelay}, true, r.markInvalidSpec(ctx, cluster, reasonTLSSecretProblem, problem)
+}
+
+// podTLSSecret is the Secret a pod was started with its certificate from, or
+// empty if it was started without one.
+func podTLSSecret(pod *corev1.Pod) string {
+	for _, v := range pod.Spec.Volumes {
+		if v.Name == tlsVolumeName && v.Secret != nil {
+			return v.Secret.SecretName
+		}
+	}
+	return ""
 }
 
 // podServesTLS is whether a pod was started with the cluster's certificate: its

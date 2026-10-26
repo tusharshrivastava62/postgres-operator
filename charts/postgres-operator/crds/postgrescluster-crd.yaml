@@ -789,12 +789,38 @@ spec:
                   supply. Everything in it is off unless set, and changing it replaces the
                   pods one at a time.
                 properties:
+                  patroniAPI:
+                    description: |-
+                      patroniAPI protects the Patroni REST API, which can change the cluster's
+                      configuration and hand its leadership over, and which answers to anyone who
+                      can reach port 8008 unless this is set.
+                    properties:
+                      authentication:
+                        description: |-
+                          authentication makes the API refuse every request that changes anything
+                          (the configuration, a restart, a reload, a switchover) unless it carries
+                          the cluster's API password, which the operator generates into
+                          <name>-credentials as patroni-api-password and replaces with the
+                          superuser's. Requests that only read, such as the kubelet's health checks,
+                          are still answered to everyone. Setting it replaces the pods one at a time.
+                        type: boolean
+                    type: object
                   tls:
                     description: |-
                       tls makes the database present a certificate you supply, so that a client
                       can check who it is talking to. Without it the server presents one the
                       image made, which encrypts the connection and proves nothing.
                     properties:
+                      patroniAPI:
+                        description: |-
+                          patroniAPI makes Patroni's REST API answer over TLS with this certificate,
+                          and nothing else, and makes the members reach each other by their names
+                          under the headless Service, which the certificate is valid for. The
+                          operator checks the certificate when it calls the API. Plain HTTP on port
+                          8008 stops being served. A backup the image takes when a pod starts waits
+                          for Patroni over plain HTTP, and does not run; the scheduled backups are
+                          not affected.
+                        type: boolean
                       secretName:
                         description: |-
                           secretName names a Secret in the cluster's namespace with tls.crt (the
@@ -1196,6 +1222,24 @@ spec:
               security:
                 description: security reports what the operator observed about spec.security.
                 properties:
+                  patroniAPI:
+                    description: |-
+                      patroniAPI is how the primary's Patroni API was started. It differs from
+                      spec.security while the pods are being replaced.
+                    properties:
+                      authenticated:
+                        description: |-
+                          authenticated is true when the primary's API refuses requests that change
+                          anything unless they carry the API password.
+                        type: boolean
+                      tls:
+                        description: tls is true when the primary's API answers over
+                          TLS only.
+                        type: boolean
+                    required:
+                    - authenticated
+                    - tls
+                    type: object
                   tls:
                     description: |-
                       tls is the certificate the primary presented when the operator last

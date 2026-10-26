@@ -93,6 +93,10 @@ func spiloConfiguration(cluster *dbv1alpha1.PostgresCluster) (string, error) {
 			"ports": []map[string]any{{"name": postgresPortName, "port": postgresPort}},
 		},
 	}
+	// The API's own credentials cannot go through it either.
+	if apiAuthenticationOn(cluster) {
+		config["restapi"] = restAPIConfiguration()
+	}
 	// The one setting that cannot go through Patroni's REST API; see
 	// paramPreload. A cluster without compliance settings keeps Spilo's list.
 	if libraries := preloadLibraries(cluster); libraries != "" {
@@ -136,8 +140,12 @@ func spiloEnv(cluster *dbv1alpha1.PostgresCluster) ([]corev1.EnvVar, error) {
 		{Name: "PGPASSWORD_STANDBY", ValueFrom: secretKeyRef(cluster, secretKeyReplicationPassword)},
 		{Name: "POD_IP", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"}}},
 		{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}}},
-		{Name: "SPILO_CONFIGURATION", Value: config},
 	}...)
+	// The configuration refers to this variable, so it has to come first.
+	if apiAuthenticationOn(cluster) {
+		env = append(env, corev1.EnvVar{Name: envRESTAPIPassword, ValueFrom: secretKeyRef(cluster, secretKeyPatroniAPI)})
+	}
+	env = append(env, corev1.EnvVar{Name: "SPILO_CONFIGURATION", Value: config})
 	return append(env, backup...), nil
 }
 
@@ -284,6 +292,7 @@ func desiredStatefulSetAt(cluster *dbv1alpha1.PostgresCluster, image, credential
 	}
 	if secretName := cluster.Spec.Security.TLSSecretName(); secretName != "" {
 		useTLS(sts, secretName)
+		useAPISecurity(sts, cluster)
 	}
 	return sts, nil
 }

@@ -12,6 +12,7 @@ package controller
 
 import (
 	"context"
+	"crypto/x509"
 	"fmt"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -677,26 +678,65 @@ type fakePatroni struct {
 	calls     []string
 	addresses []string
 	patched   map[string]any
+	// targets is every target a call was made to, in order.
+	targets []PatroniTarget
 
 	// switchovers records each request as "<leader>-><candidate>"; a request
 	// with no candidate ends in "->".
 	switchovers   []string
 	switchoverErr map[string]error
+
+	// served is the certificate each member's API presents, by address; reloads
+	// is the addresses asked to reload. A reload makes a member present
+	// reloadsTo, if it is set, as a real one rereads its file.
+	served    map[string]*x509.Certificate
+	servedErr error
+	reloads   []string
+	reloadsTo *x509.Certificate
+	reloadErr error
 }
 
-func (f *fakePatroni) Switchover(_ context.Context, address, leader, candidate string) error {
+func (f *fakePatroni) Reload(_ context.Context, target PatroniTarget) error {
+	f.targets = append(f.targets, target)
+	f.reloads = append(f.reloads, target.Address)
+	if f.reloadErr != nil {
+		return f.reloadErr
+	}
+	if f.reloadsTo != nil {
+		if f.served == nil {
+			f.served = map[string]*x509.Certificate{}
+		}
+		f.served[target.Address] = f.reloadsTo
+	}
+	return nil
+}
+
+func (f *fakePatroni) ServedCertificate(_ context.Context, target PatroniTarget) (*x509.Certificate, error) {
+	if f.servedErr != nil {
+		return nil, f.servedErr
+	}
+	return f.served[target.Address], nil
+}
+
+func (f *fakePatroni) Switchover(_ context.Context, target PatroniTarget, leader, candidate string) error {
+	address := target.Address
+	f.targets = append(f.targets, target)
 	f.calls = append(f.calls, "switchover "+address)
 	f.switchovers = append(f.switchovers, leader+"->"+candidate)
 	return f.switchoverErr[candidate]
 }
 
-func (f *fakePatroni) GetConfig(_ context.Context, address string) (map[string]any, error) {
+func (f *fakePatroni) GetConfig(_ context.Context, target PatroniTarget) (map[string]any, error) {
+	address := target.Address
+	f.targets = append(f.targets, target)
 	f.calls = append(f.calls, "get "+address)
 	f.addresses = append(f.addresses, address)
 	return f.live, f.getErr
 }
 
-func (f *fakePatroni) PatchConfig(_ context.Context, address string, patch map[string]any) error {
+func (f *fakePatroni) PatchConfig(_ context.Context, target PatroniTarget, patch map[string]any) error {
+	address := target.Address
+	f.targets = append(f.targets, target)
 	f.calls = append(f.calls, "patch "+address)
 	f.addresses = append(f.addresses, address)
 	f.patched = patch

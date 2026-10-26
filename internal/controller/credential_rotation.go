@@ -167,6 +167,9 @@ func (r *PostgresClusterReconciler) reconcileCredentialRotation(
 	last := timePtr(lastRotated(secret))
 
 	if !inProgress && !due {
+		if err := r.dropPreviousAPIPassword(ctx, cluster, secret, rolling); err != nil {
+			return false, err
+		}
 		state := dbv1alpha1.CredentialsIdle
 		if rolling && credentialsVersion(secret) != "" {
 			state = dbv1alpha1.CredentialsRolling
@@ -204,9 +207,20 @@ func (r *PostgresClusterReconciler) reconcileCredentialRotation(
 		if err != nil {
 			return false, err
 		}
+		// The Patroni API's password is replaced with them, if the cluster has one:
+		// it too is read from the environment when a pod starts.
+		nextAPI := ""
+		if apiAuthenticationOn(cluster) && len(secret.Data[secretKeyPatroniAPI]) > 0 {
+			if nextAPI, err = generateAPIPassword(); err != nil {
+				return false, err
+			}
+		}
 		if err := r.patchSecret(ctx, secret, func(s *corev1.Secret) {
 			s.Data[secretKeyPasswordNext] = []byte(next)
 			s.Data[secretKeyReplicationPasswordNext] = []byte(nextReplication)
+			if nextAPI != "" {
+				s.Data[secretKeyPatroniAPINext] = []byte(nextAPI)
+			}
 		}); err != nil {
 			return false, fmt.Errorf("writing the new passwords: %w", err)
 		}
@@ -243,6 +257,13 @@ func (r *PostgresClusterReconciler) reconcileCredentialRotation(
 		s.Data[secretKeyReplicationPassword] = s.Data[secretKeyReplicationPasswordNext]
 		delete(s.Data, secretKeyPasswordNext)
 		delete(s.Data, secretKeyReplicationPasswordNext)
+		// The pods that are not yet replaced still ask for the old API password,
+		// so it is kept until they are.
+		if next, ok := s.Data[secretKeyPatroniAPINext]; ok {
+			s.Data[secretKeyPatroniAPIPrevious] = s.Data[secretKeyPatroniAPI]
+			s.Data[secretKeyPatroniAPI] = next
+			delete(s.Data, secretKeyPatroniAPINext)
+		}
 		stampRotation(s, now)
 		s.Annotations[annotationCredentialsVersion] = strconv.Itoa(version)
 	}); err != nil {
@@ -364,4 +385,28 @@ func (r *PostgresClusterReconciler) recordCredentialAges(ctx context.Context, cl
 	if oldest != nil {
 		set(credentialApplication, oldest)
 	}
+}
+
+// dropPreviousAPIPassword removes the Patroni API password the pods used before
+// the last replacement, once every pod has been started with the new one.
+func (r *PostgresClusterReconciler) dropPreviousAPIPassword(
+	ctx context.Context, cluster *dbv1alpha1.PostgresCluster, secret *corev1.Secret, rolling bool,
+) error {
+	if _, ok := secret.Data[secretKeyPatroniAPIPrevious]; !ok || rolling {
+		return nil
+	}
+	pods := &corev1.PodList{}
+	if err := r.List(ctx, pods, client.InNamespace(cluster.Namespace), client.MatchingLabels(podSelectorLabels(cluster))); err != nil {
+		return err
+	}
+	version := credentialsVersion(secret)
+	if len(pods.Items) < int(cluster.Spec.Instances) {
+		return nil
+	}
+	for i := range pods.Items {
+		if pods.Items[i].Annotations[annotationCredentialsVersion] != version {
+			return nil
+		}
+	}
+	return r.patchSecret(ctx, secret, func(s *corev1.Secret) { delete(s.Data, secretKeyPatroniAPIPrevious) })
 }

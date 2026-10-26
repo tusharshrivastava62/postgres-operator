@@ -118,3 +118,24 @@ func (r *PostgresClusterReconciler) setTLSStatus(
 	}
 	return r.Status().Update(ctx, cluster)
 }
+
+// reconcileSecurity looks at what the cluster's security settings did to the
+// running pods: whether the primary presents the certificate and is verified,
+// how its Patroni API was started, and whether each member's API presents the
+// certificate that is in the Secret now. It needs a primary, and decides whether
+// the jobs check the certificate. It reports whether to look again soon: the
+// jobs are due to change what they do, or a member was asked to reload.
+func (r *PostgresClusterReconciler) reconcileSecurity(ctx context.Context, cluster *dbv1alpha1.PostgresCluster) (bool, error) {
+	changed, err := r.reconcileTLSStatus(ctx, cluster)
+	if err != nil {
+		return false, fmt.Errorf("checking the database's certificate: %w", err)
+	}
+	if err := r.reconcilePatroniAPIStatus(ctx, cluster); err != nil {
+		return false, fmt.Errorf("recording how the Patroni API was started: %w", err)
+	}
+	reloading, err := r.reconcileAPICertificate(ctx, cluster)
+	if err != nil {
+		return false, fmt.Errorf("renewing the certificate the Patroni API presents: %w", err)
+	}
+	return changed || reloading, nil
+}

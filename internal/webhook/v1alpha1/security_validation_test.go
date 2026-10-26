@@ -86,6 +86,44 @@ var _ = Describe("PostgresCluster security validation", func() {
 		Expect(strings.Join(warnings, " ")).To(And(ContainSubstring("replaces every database pod"), ContainSubstring("made for itself")))
 	})
 
+	It("warns that asking for the Patroni API password replaces every pod, and what it then refuses", func() {
+		asking := cluster.DeepCopy()
+		asking.Spec.Security = &dbv1alpha1.SecuritySpec{PatroniAPI: &dbv1alpha1.PatroniAPISpec{Authentication: true}}
+		warnings, err := validator.ValidateUpdate(ctx, cluster, asking)
+		Expect(err).NotTo(HaveOccurred())
+		joined := strings.Join(warnings, " ")
+		Expect(joined).To(And(ContainSubstring("patroniAPI.authentication"), ContainSubstring("every database pod is replaced"),
+			ContainSubstring("patroni-api-password"), ContainSubstring("crosses the pod network unencrypted")))
+
+		By("and not the last, when the API is also over TLS")
+		both := withTLS("orders-tls")
+		both.Spec.Security.TLS.PatroniAPI = true
+		both.Spec.Security.PatroniAPI = &dbv1alpha1.PatroniAPISpec{Authentication: true}
+		warnings, err = validator.ValidateUpdate(ctx, withTLS("orders-tls"), both)
+		Expect(err).NotTo(HaveOccurred())
+		joined = strings.Join(warnings, " ")
+		Expect(joined).To(ContainSubstring("patroniAPI.authentication"))
+		Expect(joined).NotTo(ContainSubstring("crosses the pod network unencrypted"))
+
+		By("and what taking it away does")
+		warnings, err = validator.ValidateUpdate(ctx, asking, cluster)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.Join(warnings, " ")).To(ContainSubstring("anyone who can reach port 8008"))
+	})
+
+	It("warns that Patroni's API over TLS stops serving plain HTTP, and what that costs the image", func() {
+		on := withTLS("orders-tls")
+		on.Spec.Security.TLS.PatroniAPI = true
+		warnings, err := validator.ValidateUpdate(ctx, withTLS("orders-tls"), on)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.Join(warnings, " ")).To(And(ContainSubstring("tls.patroniAPI"), ContainSubstring("TLS only"),
+			ContainSubstring("does not run"), ContainSubstring("every database pod is replaced")))
+
+		warnings, err = validator.ValidateUpdate(ctx, on, withTLS("orders-tls"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.Join(warnings, " ")).To(ContainSubstring("goes back to plain HTTP"))
+	})
+
 	It("does not warn about a change that leaves the certificate as it was", func() {
 		changed := withTLS("orders-tls")
 		changed.Spec.Instances = 3

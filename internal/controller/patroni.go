@@ -13,7 +13,10 @@ package controller
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -59,45 +62,67 @@ const switchoverTimeout = 60 * time.Second
 // talk to yet, as during cluster creation or a failover.
 const leaderRequeueDelay = 10 * time.Second
 
+// PatroniTarget is one member's REST API and how to call it.
+type PatroniTarget struct {
+	Address string
+	// Port is the API's port; Patroni's own when zero.
+	Port int32
+
+	// Username and Passwords are sent as HTTP Basic credentials. The passwords
+	// are tried in turn when the API answers 401: while the pods are being
+	// replaced with a new password, one that has not been still asks for the old.
+	Username  string
+	Passwords []string
+
+	// TLS, when set, makes the call over HTTPS and checks the member's
+	// certificate against its roots and name. Unset, the call is plain HTTP,
+	// which is how the Spilo image serves the API unless it is told otherwise.
+	TLS *SQLTLS
+}
+
+func (t PatroniTarget) url(path string) string {
+	scheme := "http"
+	if t.TLS != nil {
+		scheme = "https"
+	}
+	port := t.Port
+	if port == 0 {
+		port = patroniPort
+	}
+	return scheme + "://" + net.JoinHostPort(t.Address, strconv.Itoa(int(port))) + path
+}
+
 // PatroniAPI is the part of a member's REST API the operator uses.
 type PatroniAPI interface {
 	// GetConfig returns the cluster-wide dynamic configuration.
-	GetConfig(ctx context.Context, address string) (map[string]any, error)
+	GetConfig(ctx context.Context, target PatroniTarget) (map[string]any, error)
 	// PatchConfig merges the given keys into it. Patroni validates the
 	// merged result as a whole and rejects an inconsistent change.
-	PatchConfig(ctx context.Context, address string, patch map[string]any) error
-	// Switchover asks the leader at address to hand leadership to candidate,
+	PatchConfig(ctx context.Context, target PatroniTarget, patch map[string]any) error
+	// Switchover asks the leader at target to hand leadership to candidate,
 	// or to any eligible replica when candidate is empty. It returns once
 	// the handover has completed.
-	Switchover(ctx context.Context, address, leader, candidate string) error
+	Switchover(ctx context.Context, target PatroniTarget, leader, candidate string) error
+	// Reload asks the member to reread its configuration and the certificate
+	// its API serves from, which it does not do by itself when the file changes.
+	Reload(ctx context.Context, target PatroniTarget) error
+	// ServedCertificate is the certificate the member's API presents. It asks
+	// for nothing and sends nothing: it only reads what the handshake shows.
+	ServedCertificate(ctx context.Context, target PatroniTarget) (*x509.Certificate, error)
 }
 
-// httpPatroni talks to Patroni's REST API over plain HTTP, which is how the
-// Spilo image serves it.
-type httpPatroni struct {
-	client *http.Client
-}
+// httpPatroni talks to Patroni's REST API.
+type httpPatroni struct{}
 
-func newHTTPPatroni() *httpPatroni {
-	// No client-wide timeout: each request carries its own deadline.
-	return &httpPatroni{client: &http.Client{}}
-}
-
-func patroniURL(address string) string {
-	return "http://" + net.JoinHostPort(address, strconv.Itoa(int(patroniPort))) + "/config"
-}
+func newHTTPPatroni() *httpPatroni { return &httpPatroni{} }
 
 // requestTimeout bounds a read or a configuration change.
 const requestTimeout = 10 * time.Second
 
-func (p *httpPatroni) GetConfig(ctx context.Context, address string) (map[string]any, error) {
+func (p *httpPatroni) GetConfig(ctx context.Context, target PatroniTarget) (map[string]any, error) {
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, patroniURL(address), nil)
-	if err != nil {
-		return nil, err
-	}
-	body, err := p.do(req)
+	body, err := p.do(ctx, target, http.MethodGet, "/config", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -108,23 +133,48 @@ func (p *httpPatroni) GetConfig(ctx context.Context, address string) (map[string
 	return config, nil
 }
 
-func (p *httpPatroni) PatchConfig(ctx context.Context, address string, patch map[string]any) error {
+func (p *httpPatroni) PatchConfig(ctx context.Context, target PatroniTarget, patch map[string]any) error {
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 	payload, err := json.Marshal(patch)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, patroniURL(address), bytes.NewReader(payload))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	_, err = p.do(req)
+	_, err = p.do(ctx, target, http.MethodPatch, "/config", payload)
 	return err
 }
 
-func (p *httpPatroni) Switchover(ctx context.Context, address, leader, candidate string) error {
+func (p *httpPatroni) Reload(ctx context.Context, target PatroniTarget) error {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	_, err := p.do(ctx, target, http.MethodPost, "/reload", nil)
+	return err
+}
+
+func (p *httpPatroni) ServedCertificate(ctx context.Context, target PatroniTarget) (*x509.Certificate, error) {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	// The certificate is only read, and nothing is sent over the connection, so
+	// it is not checked here: an old one that no longer chains is the very thing
+	// this is looking for.
+	dialer := &tls.Dialer{Config: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}} //nolint:gosec // see above
+	port := target.Port
+	if port == 0 {
+		port = patroniPort
+	}
+	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(target.Address, strconv.Itoa(int(port))))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = conn.Close() }()
+	certs := conn.(*tls.Conn).ConnectionState().PeerCertificates
+	if len(certs) == 0 {
+		return nil, errors.New("the member presented no certificate")
+	}
+	return certs[0], nil
+}
+
+func (p *httpPatroni) Switchover(ctx context.Context, target PatroniTarget, leader, candidate string) error {
 	body := map[string]string{"leader": leader}
 	if candidate != "" {
 		body["candidate"] = candidate
@@ -137,30 +187,60 @@ func (p *httpPatroni) Switchover(ctx context.Context, address, leader, candidate
 	// take over, which takes a few seconds; allow far longer than a read.
 	ctx, cancel := context.WithTimeout(ctx, switchoverTimeout)
 	defer cancel()
-	url := "http://" + net.JoinHostPort(address, strconv.Itoa(int(patroniPort))) + "/switchover"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	_, err = p.do(req)
+	_, err = p.do(ctx, target, http.MethodPost, "/switchover", payload)
 	return err
 }
 
-func (p *httpPatroni) do(req *http.Request) ([]byte, error) {
-	resp, err := p.client.Do(req)
+// do makes one call, with each password in turn if it is refused for want of
+// the right one.
+func (p *httpPatroni) do(ctx context.Context, target PatroniTarget, method, path string, payload []byte) ([]byte, error) {
+	httpClient := &http.Client{}
+	if target.TLS != nil {
+		transport := &http.Transport{TLSClientConfig: &tls.Config{
+			RootCAs: target.TLS.Roots, ServerName: target.TLS.ServerName, MinVersion: tls.VersionTLS12,
+		}}
+		defer transport.CloseIdleConnections()
+		httpClient.Transport = transport
+	}
+	passwords := target.Passwords
+	if len(passwords) == 0 {
+		passwords = []string{""}
+	}
+	var lastErr error
+	for _, password := range passwords {
+		req, err := http.NewRequestWithContext(ctx, method, target.url(path), bytes.NewReader(payload))
+		if err != nil {
+			return nil, err
+		}
+		if payload != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if password != "" {
+			req.SetBasicAuth(target.Username, password)
+		}
+		body, status, err := send(httpClient, req)
+		if err != nil {
+			return nil, err
+		}
+		if status >= http.StatusOK && status < http.StatusMultipleChoices {
+			return body, nil
+		}
+		lastErr = fmt.Errorf("patroni %s %s returned %d: %s", method, path, status, bytes.TrimSpace(body))
+		if status != http.StatusUnauthorized {
+			return nil, lastErr
+		}
+	}
+	return nil, lastErr
+}
+
+func send(httpClient *http.Client, req *http.Request) (body []byte, status int, err error) {
+	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("patroni %s %s returned %d: %s", req.Method, req.URL.Path, resp.StatusCode, bytes.TrimSpace(body))
-	}
-	return body, nil
+	body, err = io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return body, resp.StatusCode, err
 }
 
 // desiredDynamicConfig is the slice of Patroni's dynamic configuration this
@@ -289,7 +369,11 @@ func (r *PostgresClusterReconciler) syncPatroniConfig(ctx context.Context, clust
 	if api == nil {
 		api = defaultPatroni
 	}
-	live, err := api.GetConfig(ctx, address)
+	target, err := patroniTargetFor(ctx, r.Client, cluster, leader, address)
+	if err != nil {
+		return false, err
+	}
+	live, err := api.GetConfig(ctx, target)
 	if err != nil {
 		// The leader named in the DCS may be the old one, still shutting
 		// down, so this is expected during a failover.
@@ -303,7 +387,7 @@ func (r *PostgresClusterReconciler) syncPatroniConfig(ctx context.Context, clust
 	if len(diff) == 0 {
 		return true, nil
 	}
-	if err := api.PatchConfig(ctx, address, diff); err != nil {
+	if err := api.PatchConfig(ctx, target, diff); err != nil {
 		return false, fmt.Errorf("updating Patroni configuration on %s: %w", leader, err)
 	}
 	log.Info("updated Patroni configuration", "leader", leader, "changed", diff)

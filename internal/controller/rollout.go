@@ -304,12 +304,16 @@ func (r *PostgresClusterReconciler) reconcileRollout(
 		if api == nil {
 			api = defaultPatroni
 		}
-		err := api.Switchover(ctx, leader.Status.PodIP, action.pod, action.candidate)
+		target, err := patroniTargetFor(ctx, r.Client, cluster, leader.Name, leader.Status.PodIP)
+		if err != nil {
+			return false, err
+		}
+		err = api.Switchover(ctx, target, action.pod, action.candidate)
 		if err != nil {
 			// Patroni may refuse a particular candidate (in synchronous mode
 			// only the synchronous standby is eligible). Let it choose.
 			log.Info("switchover to the chosen replica failed, letting Patroni choose", "error", err.Error())
-			err = api.Switchover(ctx, leader.Status.PodIP, action.pod, "")
+			err = api.Switchover(ctx, target, action.pod, "")
 		}
 		if err != nil {
 			log.Info("switchover failed, will retry", "error", err.Error())

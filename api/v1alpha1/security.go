@@ -45,6 +45,24 @@ type SecuritySpec struct {
 	// image made, which encrypts the connection and proves nothing.
 	// +optional
 	TLS *TLSSpec `json:"tls,omitempty"`
+
+	// patroniAPI protects the Patroni REST API, which can change the cluster's
+	// configuration and hand its leadership over, and which answers to anyone who
+	// can reach port 8008 unless this is set.
+	// +optional
+	PatroniAPI *PatroniAPISpec `json:"patroniAPI,omitempty"`
+}
+
+// PatroniAPISpec says who may change a cluster through Patroni's REST API.
+type PatroniAPISpec struct {
+	// authentication makes the API refuse every request that changes anything
+	// (the configuration, a restart, a reload, a switchover) unless it carries
+	// the cluster's API password, which the operator generates into
+	// <name>-credentials as patroni-api-password and replaces with the
+	// superuser's. Requests that only read, such as the kubelet's health checks,
+	// are still answered to everyone. Setting it replaces the pods one at a time.
+	// +optional
+	Authentication bool `json:"authentication,omitempty"`
 }
 
 // TLSSpec says which certificate the database presents.
@@ -61,6 +79,16 @@ type TLSSpec struct {
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Required
 	SecretName string `json:"secretName"`
+
+	// patroniAPI makes Patroni's REST API answer over TLS with this certificate,
+	// and nothing else, and makes the members reach each other by their names
+	// under the headless Service, which the certificate is valid for. The
+	// operator checks the certificate when it calls the API. Plain HTTP on port
+	// 8008 stops being served. A backup the image takes when a pod starts waits
+	// for Patroni over plain HTTP, and does not run; the scheduled backups are
+	// not affected.
+	// +optional
+	PatroniAPI bool `json:"patroniAPI,omitempty"`
 }
 
 // SecurityStatus is what the operator observed about the settings in
@@ -70,6 +98,21 @@ type SecurityStatus struct {
 	// connected to it.
 	// +optional
 	TLS *TLSStatus `json:"tls,omitempty"`
+
+	// patroniAPI is how the primary's Patroni API was started. It differs from
+	// spec.security while the pods are being replaced.
+	// +optional
+	PatroniAPI *PatroniAPIStatus `json:"patroniAPI,omitempty"`
+}
+
+// PatroniAPIStatus is how the primary's Patroni API was started.
+type PatroniAPIStatus struct {
+	// authenticated is true when the primary's API refuses requests that change
+	// anything unless they carry the API password.
+	Authenticated bool `json:"authenticated"`
+
+	// tls is true when the primary's API answers over TLS only.
+	TLS bool `json:"tls"`
 }
 
 // TLSStatus is the certificate a database presented.
@@ -94,6 +137,17 @@ func (s *SecuritySpec) TLSSecretName() string {
 		return ""
 	}
 	return s.TLS.SecretName
+}
+
+// PatroniAPIAuthentication is whether the Patroni API is to require the
+// operator's password for requests that change anything.
+func (s *SecuritySpec) PatroniAPIAuthentication() bool {
+	return s != nil && s.PatroniAPI != nil && s.PatroniAPI.Authentication
+}
+
+// PatroniAPITLS is whether the Patroni API is to answer over TLS.
+func (s *SecuritySpec) PatroniAPITLS() bool {
+	return s != nil && s.TLS != nil && s.TLS.PatroniAPI
 }
 
 // ValidateSecurity checks the shape of spec.security. The webhook refuses a spec
