@@ -33,6 +33,22 @@ func TestSecurityIsOffUnlessSet(t *testing.T) {
 	}
 }
 
+func TestReplicationRoleIsLimitedOnlyWhenAskedAndTheLoginIsReserved(t *testing.T) {
+	var unset *SecuritySpec
+	if unset.RestrictsReplicationRole() || (&SecuritySpec{}).RestrictsReplicationRole() {
+		t.Error("a cluster that did not ask is limited")
+	}
+	if !(&SecuritySpec{RestrictReplicationRole: true}).RestrictsReplicationRole() {
+		t.Error("a cluster that asked is not")
+	}
+	// An application role of the rewind login's name would take it over.
+	spec := &PostgresClusterSpec{Roles: []RoleSpec{{Name: "pgoperator_rewind"}}}
+	errs := spec.ValidateAccessControl("orders")
+	if len(errs) == 0 || !strings.Contains(errs.ToAggregate().Error(), "pgoperator_rewind") {
+		t.Errorf("the login's name is not reserved: %v", errs)
+	}
+}
+
 func TestTheCertificateSecretNameMustBeAName(t *testing.T) {
 	cases := map[string]bool{
 		secretOK:                 true,

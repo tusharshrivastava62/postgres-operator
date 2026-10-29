@@ -51,6 +51,21 @@ type SecuritySpec struct {
 	// can reach port 8008 unless this is set.
 	// +optional
 	PatroniAPI *PatroniAPISpec `json:"patroniAPI,omitempty"`
+
+	// restrictReplicationRole makes the replication role good for replicating and
+	// nothing else, and gives pg_rewind a login of its own. By default the role
+	// the replicas stream with can also log in like any other user and run
+	// queries, and pg_rewind, which Patroni runs to bring a former primary back
+	// as a replica, does so as the superuser. With this set the server refuses the
+	// replication role everything but replication, and Patroni rewinds as
+	// pgoperator_rewind, a login that can do nothing but read the files pg_rewind
+	// needs. The password of that login is in <name>-credentials as
+	// rewind-password and is replaced with the superuser's. The server's rules for
+	// who may connect are written out by the operator, in place of the image's;
+	// the only ones that go are the image's rules for a group role it does not
+	// create. Setting it replaces the pods one at a time.
+	// +optional
+	RestrictReplicationRole bool `json:"restrictReplicationRole,omitempty"`
 }
 
 // PatroniAPISpec says who may change a cluster through Patroni's REST API.
@@ -137,6 +152,12 @@ func (s *SecuritySpec) TLSSecretName() string {
 		return ""
 	}
 	return s.TLS.SecretName
+}
+
+// RestrictsReplicationRole is whether the replication role is to be limited to
+// replicating, and pg_rewind given a login of its own.
+func (s *SecuritySpec) RestrictsReplicationRole() bool {
+	return s != nil && s.RestrictReplicationRole
 }
 
 // PatroniAPIAuthentication is whether the Patroni API is to require the

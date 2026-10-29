@@ -57,6 +57,9 @@ const (
 
 // monitorRoleWanted reports whether anything runs that needs the role. Both
 // jobs that read the database over SQL are optional.
+// roleLacksPrivileges is what status says of a role that cannot be used.
+const roleLacksPrivileges = "the role does not have the expected privileges"
+
 func monitorRoleWanted(cluster *dbv1alpha1.PostgresCluster) bool {
 	return (cluster.Spec.Backup.Enabled && cluster.Spec.Backup.Destination != nil) || cluster.Spec.Compliance != nil
 }
@@ -257,7 +260,7 @@ func (r *PostgresClusterReconciler) reconcileMonitorRole(ctx context.Context, cl
 			return false, r.setMonitorStatus(ctx, cluster, dbv1alpha1.RoleError, "could not set up the role: "+err.Error(), rotated)
 		}
 		if verified, err = r.verifyMonitorRole(ctx, target); err != nil || !verified {
-			reason := "the role does not have the expected privileges"
+			reason := roleLacksPrivileges
 			if err != nil {
 				reason = err.Error()
 			}
@@ -286,7 +289,7 @@ func (r *PostgresClusterReconciler) rotateMonitorPassword(
 	}
 	verified, err := r.verifyMonitorRole(ctx, target)
 	if err != nil || !verified {
-		reason := "the role does not have the expected privileges"
+		reason := roleLacksPrivileges
 		if err != nil {
 			reason = err.Error()
 		}

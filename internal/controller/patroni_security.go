@@ -55,10 +55,11 @@ const (
 	envPodName               = "POD_NAME"
 )
 
-// generateAPIPassword makes a password for Patroni's API. It starts with a
-// letter, because it is written into a YAML document and one that looked like a
-// number or a word YAML knows would be read as something else.
-func generateAPIPassword() (string, error) {
+// generateConfigPassword makes a password that is written into Patroni's
+// configuration. It starts with a letter, because the configuration is a YAML
+// document and a password that looked like a number or a word YAML knows would
+// be read as something else.
+func generateConfigPassword() (string, error) {
 	password, err := generatePassword()
 	if err != nil {
 		return "", err

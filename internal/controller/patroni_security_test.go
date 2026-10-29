@@ -158,7 +158,7 @@ var _ = Describe("The Patroni API", func() {
 			Expect(secretOf("api-off-credentials").Data).NotTo(HaveKey(secretKeyPatroniAPI))
 			sts := stsOf("api-off")
 			Expect(envOf(sts)).NotTo(HaveKey(envRESTAPIPassword))
-			Expect(envOf(sts)["SPILO_CONFIGURATION"].Value).NotTo(ContainSubstring("restapi"))
+			Expect(envOf(sts)[envSpiloConfiguration].Value).NotTo(ContainSubstring("restapi"))
 			Expect(envOf(sts)).NotTo(HaveKey(envRESTAPICertificate))
 			Expect(envOf(sts)).NotTo(HaveKey(envRESTAPIConnectAddress))
 			for _, probe := range []*corev1.Probe{sts.Spec.Template.Spec.Containers[0].ReadinessProbe, sts.Spec.Template.Spec.Containers[0].LivenessProbe} {
@@ -205,7 +205,7 @@ var _ = Describe("The Patroni API", func() {
 					Authentication struct{ Username, Password string }
 				} `json:"restapi"`
 			}
-			Expect(yaml.Unmarshal([]byte(env["SPILO_CONFIGURATION"].Value), &config)).To(Succeed())
+			Expect(yaml.Unmarshal([]byte(env[envSpiloConfiguration].Value), &config)).To(Succeed())
 			Expect(config.RestAPI.Authentication.Username).To(Equal("operator"))
 			Expect(config.RestAPI.Authentication.Password).To(Equal("$(REST_API_PASSWORD)"))
 
@@ -215,7 +215,7 @@ var _ = Describe("The Patroni API", func() {
 			for _, e := range podEnv {
 				names = append(names, e.Name)
 			}
-			Expect(indexOf(names, envRESTAPIPassword)).To(BeNumerically("<", indexOf(names, "SPILO_CONFIGURATION")))
+			Expect(indexOf(names, envRESTAPIPassword)).To(BeNumerically("<", indexOf(names, envSpiloConfiguration)))
 		})
 
 		It("keeps the password when it is no longer asked for, and takes the variable out of the pod", func() {
@@ -229,7 +229,7 @@ var _ = Describe("The Patroni API", func() {
 			reconcileOnce("api-keep")
 
 			Expect(envOf(stsOf("api-keep"))).NotTo(HaveKey(envRESTAPIPassword))
-			Expect(envOf(stsOf("api-keep"))["SPILO_CONFIGURATION"].Value).NotTo(ContainSubstring("restapi"))
+			Expect(envOf(stsOf("api-keep"))[envSpiloConfiguration].Value).NotTo(ContainSubstring("restapi"))
 			Expect(string(secretOf("api-keep-credentials").Data[secretKeyPatroniAPI])).To(Equal(password))
 		})
 

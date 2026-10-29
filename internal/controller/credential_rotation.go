@@ -199,30 +199,8 @@ func (r *PostgresClusterReconciler) reconcileCredentialRotation(
 
 	// 1. The new passwords wait beside the old.
 	if !inProgress {
-		next, err := generatePassword()
-		if err != nil {
+		if err := r.writeNextPasswords(ctx, cluster, secret); err != nil {
 			return false, err
-		}
-		nextReplication, err := generatePassword()
-		if err != nil {
-			return false, err
-		}
-		// The Patroni API's password is replaced with them, if the cluster has one:
-		// it too is read from the environment when a pod starts.
-		nextAPI := ""
-		if apiAuthenticationOn(cluster) && len(secret.Data[secretKeyPatroniAPI]) > 0 {
-			if nextAPI, err = generateAPIPassword(); err != nil {
-				return false, err
-			}
-		}
-		if err := r.patchSecret(ctx, secret, func(s *corev1.Secret) {
-			s.Data[secretKeyPasswordNext] = []byte(next)
-			s.Data[secretKeyReplicationPasswordNext] = []byte(nextReplication)
-			if nextAPI != "" {
-				s.Data[secretKeyPatroniAPINext] = []byte(nextAPI)
-			}
-		}); err != nil {
-			return false, fmt.Errorf("writing the new passwords: %w", err)
 		}
 		log.Info("Started replacing the superuser and replication passwords", "reason", why)
 	}
@@ -257,6 +235,10 @@ func (r *PostgresClusterReconciler) reconcileCredentialRotation(
 		s.Data[secretKeyReplicationPassword] = s.Data[secretKeyReplicationPasswordNext]
 		delete(s.Data, secretKeyPasswordNext)
 		delete(s.Data, secretKeyReplicationPasswordNext)
+		if next, ok := s.Data[secretKeyRewindNext]; ok {
+			s.Data[secretKeyRewind] = next
+			delete(s.Data, secretKeyRewindNext)
+		}
 		// The pods that are not yet replaced still ask for the old API password,
 		// so it is kept until they are.
 		if next, ok := s.Data[secretKeyPatroniAPINext]; ok {
@@ -312,8 +294,17 @@ func (r *PostgresClusterReconciler) setNewPasswords(ctx context.Context, target 
 		return err
 	}
 	defer session.Close(ctx)
-	if err := session.Exec(ctx, fmt.Sprintf("alter role %s password %s;\nalter role %s password %s",
-		quoteIdent(target.User), sqlLiteral(superuserVerifier), quoteIdent(replicationUser), sqlLiteral(replicationVerifier))); err != nil {
+	statement := fmt.Sprintf("alter role %s password %s;\nalter role %s password %s",
+		quoteIdent(target.User), sqlLiteral(superuserVerifier), quoteIdent(replicationUser), sqlLiteral(replicationVerifier))
+	// The rewind login's, if it is being replaced too, in the same statement.
+	if next := secret.Data[secretKeyRewindNext]; len(next) > 0 {
+		rewindVerifier, err := newScramVerifier(string(next))
+		if err != nil {
+			return err
+		}
+		statement += fmt.Sprintf(";\nalter role %s password %s", quoteIdent(rewindRoleName), sqlLiteral(rewindVerifier))
+	}
+	if err := session.Exec(ctx, statement); err != nil {
 		return err
 	}
 	// Check the change took, with the password the pods will start with.
@@ -409,4 +400,50 @@ func (r *PostgresClusterReconciler) dropPreviousAPIPassword(
 		}
 	}
 	return r.patchSecret(ctx, secret, func(s *corev1.Secret) { delete(s.Data, secretKeyPatroniAPIPrevious) })
+}
+
+// writeNextPasswords puts new passwords in the credentials Secret beside the
+// old, as the *-next keys: the superuser's and the replication role's always,
+// and those of the Patroni API and the rewind login if the cluster has them.
+func (r *PostgresClusterReconciler) writeNextPasswords(
+	ctx context.Context, cluster *dbv1alpha1.PostgresCluster, secret *corev1.Secret,
+) error {
+	next, err := generatePassword()
+	if err != nil {
+		return err
+	}
+	nextReplication, err := generatePassword()
+	if err != nil {
+		return err
+	}
+	// The Patroni API's password is replaced with them, if the cluster has one:
+	// it too is read from the environment when a pod starts.
+	nextAPI := ""
+	if apiAuthenticationOn(cluster) && len(secret.Data[secretKeyPatroniAPI]) > 0 {
+		if nextAPI, err = generateConfigPassword(); err != nil {
+			return err
+		}
+	}
+	// So is the rewind login's, once it exists in the database: the statement
+	// that sets the new passwords would fail for a role that is not there.
+	nextRewind := ""
+	if restrictsReplication(cluster) && len(secret.Data[secretKeyRewind]) > 0 &&
+		cluster.Status.AccessControl.RewindRole.State == dbv1alpha1.RoleReady {
+		if nextRewind, err = generateConfigPassword(); err != nil {
+			return err
+		}
+	}
+	if err := r.patchSecret(ctx, secret, func(s *corev1.Secret) {
+		s.Data[secretKeyPasswordNext] = []byte(next)
+		s.Data[secretKeyReplicationPasswordNext] = []byte(nextReplication)
+		if nextAPI != "" {
+			s.Data[secretKeyPatroniAPINext] = []byte(nextAPI)
+		}
+		if nextRewind != "" {
+			s.Data[secretKeyRewindNext] = []byte(nextRewind)
+		}
+	}); err != nil {
+		return fmt.Errorf("writing the new passwords: %w", err)
+	}
+	return nil
 }

@@ -37,6 +37,7 @@ import (
 )
 
 const (
+	testAuthFailed    = "password authentication failed"
 	testSuperuserName = "postgres"
 	testLeaderIP      = "10.20.30.40"
 )
@@ -57,6 +58,12 @@ type fakeSQL struct {
 	monitorVerifier string
 	// monitorPrivileged is whether the role has everything the verify query asks.
 	monitorPrivileged bool
+	// The rewind login: whether it exists and can log in, the verifier of its
+	// password, and whether it has what pg_rewind needs.
+	rewindExists     bool
+	rewindLogin      bool
+	rewindVerifier   string
+	rewindPrivileged bool
 	// unreachable, when set, is what every Dial fails with: the network is down.
 	unreachable error
 	// serving, when set, is the certificate the server presents. A connection
@@ -100,15 +107,19 @@ func (f *fakeSQL) Dial(_ context.Context, target SQLTarget) (SQLSession, error) 
 		}
 	}
 	switch target.User {
+	case rewindRoleName:
+		if !f.rewindExists || !f.rewindLogin || f.rewindVerifier == "" || !verifierMatches(f.rewindVerifier, target.Password) {
+			return nil, &pgconn.PgError{Code: sqlStateInvalidPassword, Message: testAuthFailed}
+		}
 	case monitorRoleName:
 		matchesPassword := f.monitorPassword != "" && target.Password == f.monitorPassword
 		matchesVerifier := f.monitorVerifier != "" && verifierMatches(f.monitorVerifier, target.Password)
 		if !matchesPassword && !matchesVerifier {
-			return nil, &pgconn.PgError{Code: sqlStateInvalidPassword, Message: "password authentication failed"}
+			return nil, &pgconn.PgError{Code: sqlStateInvalidPassword, Message: testAuthFailed}
 		}
 	case testSuperuserName:
 		if target.Password != f.superuserPassword {
-			return nil, &pgconn.PgError{Code: sqlStateInvalidPassword, Message: "password authentication failed"}
+			return nil, &pgconn.PgError{Code: sqlStateInvalidPassword, Message: testAuthFailed}
 		}
 	default:
 		return nil, &pgconn.PgError{Code: sqlStateInvalidAuthorization, Message: "role does not exist"}
@@ -153,7 +164,10 @@ func (s *fakeSession) Exec(_ context.Context, sql string) error {
 	if s.db.afterExec != nil {
 		defer s.db.afterExec(sql)
 	}
-	if m := verifierInSQL.FindString(sql); m != "" {
+	if strings.Contains(sql, rewindRoleName) {
+		s.db.applyRewindStatement(sql)
+	}
+	if m := verifierInSQL.FindString(sql); m != "" && !strings.Contains(sql, rewindRoleName) {
 		// Believe the password only if the statement is the verifier of it.
 		s.db.monitorPassword = s.db.passwordHashedBy(m)
 		s.db.monitorVerifier = m
@@ -176,10 +190,30 @@ func (f *fakeSQL) passwordHashedBy(verifier string) string {
 	return ""
 }
 
+var rewindVerifierInSQL = regexp.MustCompile(`alter role "?` + rewindRoleName + `"?(?: with [^;]*?)? password '(SCRAM-SHA-256\$[^']+)'`)
+
+// applyRewindStatement changes the fake database as a statement about the rewind
+// login would change a real one.
+func (f *fakeSQL) applyRewindStatement(sql string) {
+	if m := rewindVerifierInSQL.FindStringSubmatch(sql); m != nil {
+		f.rewindVerifier = m[1]
+	}
+	switch {
+	case strings.Contains(sql, "create role "+rewindRoleName):
+		f.rewindExists, f.rewindLogin = true, true
+		f.rewindPrivileged = strings.Contains(sql, "grant execute on function pg_catalog.pg_ls_dir")
+	case strings.Contains(sql, "alter role "+rewindRoleName+" nologin"):
+		f.rewindLogin = false
+	}
+}
+
 func (s *fakeSession) QueryBool(_ context.Context, sql string) (bool, error) {
 	s.db.mu.Lock()
 	defer s.db.mu.Unlock()
 	s.db.queries = append(s.db.queries, s.user)
+	if s.user == rewindRoleName {
+		return s.db.rewindPrivileged, nil
+	}
 	if s.db.boolFor != nil {
 		return s.db.boolFor(s.database, sql), nil
 	}
@@ -547,8 +581,8 @@ var _ = Describe("The monitor role", func() {
 			in.rotatingCredentials = true
 			Expect(refreshDelay(in)).To(Equal(unhealthyRefreshInterval), "the superuser and replication passwords are being replaced")
 			in = well
-			in.certificatePending = true
-			Expect(refreshDelay(in)).To(Equal(unhealthyRefreshInterval), "a certificate is about to change")
+			in.securityPending = true
+			Expect(refreshDelay(in)).To(Equal(unhealthyRefreshInterval), "a security setting is not settled")
 		})
 		It("is soonest during a rolling update", func() {
 			in := well

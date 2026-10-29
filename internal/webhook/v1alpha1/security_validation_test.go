@@ -124,6 +124,25 @@ var _ = Describe("PostgresCluster security validation", func() {
 		Expect(strings.Join(warnings, " ")).To(ContainSubstring("goes back to plain HTTP"))
 	})
 
+	It("warns what limiting the replication role refuses, and what it does about pg_rewind", func() {
+		limited := cluster.DeepCopy()
+		limited.Spec.Security = &dbv1alpha1.SecuritySpec{RestrictReplicationRole: true}
+		warnings, err := validator.ValidateUpdate(ctx, cluster, limited)
+		Expect(err).NotTo(HaveOccurred())
+		joined := strings.Join(warnings, " ")
+		Expect(joined).To(And(ContainSubstring("restrictReplicationRole"), ContainSubstring("every database pod is replaced"),
+			ContainSubstring("everything but replication"), ContainSubstring("pgoperator_rewind"), ContainSubstring("rewind-password")))
+
+		warnings, err = validator.ValidateCreate(ctx, limited)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.Join(warnings, " ")).To(ContainSubstring("restrictReplicationRole"))
+
+		By("and what taking it away does")
+		warnings, err = validator.ValidateUpdate(ctx, limited, cluster)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.Join(warnings, " ")).To(And(ContainSubstring("log in like any other user again"), ContainSubstring("disabled, not dropped")))
+	})
+
 	It("does not warn about a change that leaves the certificate as it was", func() {
 		changed := withTLS("orders-tls")
 		changed.Spec.Instances = 3

@@ -805,6 +805,21 @@ spec:
                           are still answered to everyone. Setting it replaces the pods one at a time.
                         type: boolean
                     type: object
+                  restrictReplicationRole:
+                    description: |-
+                      restrictReplicationRole makes the replication role good for replicating and
+                      nothing else, and gives pg_rewind a login of its own. By default the role
+                      the replicas stream with can also log in like any other user and run
+                      queries, and pg_rewind, which Patroni runs to bring a former primary back
+                      as a replica, does so as the superuser. With this set the server refuses the
+                      replication role everything but replication, and Patroni rewinds as
+                      pgoperator_rewind, a login that can do nothing but read the files pg_rewind
+                      needs. The password of that login is in <name>-credentials as
+                      rewind-password and is replaced with the superuser's. The server's rules for
+                      who may connect are written out by the operator, in place of the image's;
+                      the only ones that go are the image's rules for a group role it does not
+                      create. Setting it replaces the pods one at a time.
+                    type: boolean
                   tls:
                     description: |-
                       tls makes the database present a certificate you supply, so that a client
@@ -923,6 +938,42 @@ spec:
                     description: |-
                       monitorRole is the read-only role the operator's own jobs connect as,
                       so that none of them holds the superuser password.
+                    properties:
+                      lastRotated:
+                        description: |-
+                          lastRotated is when the role's password was last replaced by the
+                          operator, or when it was first set.
+                        format: date-time
+                        type: string
+                      message:
+                        description: message says what is wrong when the state is
+                          not Ready.
+                        maxLength: 512
+                        type: string
+                      name:
+                        description: name is the role's name in the database.
+                        maxLength: 63
+                        minLength: 1
+                        type: string
+                      secretName:
+                        description: secretName is the Secret holding the role's username
+                          and password.
+                        type: string
+                      state:
+                        description: state is Ready, Pending, Error or Disabled.
+                        enum:
+                        - Ready
+                        - Pending
+                        - Error
+                        - Disabled
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  rewindRole:
+                    description: |-
+                      rewindRole is the login Patroni runs pg_rewind as when
+                      spec.security.restrictReplicationRole is set, instead of the superuser.
                     properties:
                       lastRotated:
                         description: |-

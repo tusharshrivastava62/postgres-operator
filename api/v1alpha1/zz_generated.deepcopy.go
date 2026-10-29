@@ -24,6 +24,7 @@ import (
 func (in *AccessControlStatus) DeepCopyInto(out *AccessControlStatus) {
 	*out = *in
 	in.MonitorRole.DeepCopyInto(&out.MonitorRole)
+	in.RewindRole.DeepCopyInto(&out.RewindRole)
 	in.Credentials.DeepCopyInto(&out.Credentials)
 	if in.Roles != nil {
 		in, out := &in.Roles, &out.Roles

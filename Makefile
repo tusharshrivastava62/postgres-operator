@@ -71,8 +71,9 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 # - CERT_MANAGER_INSTALL_SKIP=true
 KIND_CLUSTER ?= postgres-operator-test-e2e
 # go test stops a test binary after 10 minutes unless told otherwise, which the
-# end-to-end suite now exceeds on a slow runner.
-E2E_TIMEOUT ?= 45m
+# end-to-end suite now exceeds on a slow runner. Ginkgo has a limit of its own,
+# an hour, which the suite is also heading for, so both are set.
+E2E_TIMEOUT ?= 80m
 
 .PHONY: setup-test-e2e
 setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
@@ -90,7 +91,7 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout $(E2E_TIMEOUT)
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -ginkgo.timeout=$(E2E_TIMEOUT) -timeout $(E2E_TIMEOUT)
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e

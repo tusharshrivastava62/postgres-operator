@@ -264,7 +264,7 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, fmt.Errorf("syncing patroni configuration: %w", err)
 	}
 
-	certificatePending, err := r.reconcileSecurity(ctx, cluster)
+	securityPending, err := r.reconcileSecurity(ctx, cluster)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -297,7 +297,7 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	return ctrl.Result{RequeueAfter: refreshDelay(refreshInputs{
 		rolling: rolling, synced: synced, healthy: view.healthy,
 		monitorReady: monitorReady, rolesReady: rolesReady, rotatingCredentials: rotatingCredentials,
-		certificatePending: certificatePending,
+		securityPending: securityPending,
 	})}, nil
 }
 
@@ -340,11 +340,12 @@ type refreshInputs struct {
 	// rotatingCredentials is whether the superuser and replication passwords
 	// are being replaced, or are due and waiting to be.
 	rotatingCredentials bool
-	// certificatePending is whether something about a certificate is about to
-	// change, and wants another look soon: the jobs are due to start or stop
-	// checking the database's, or a member was asked to reload the one its API
-	// presents.
-	certificatePending bool
+	// securityPending is whether something about the cluster's security
+	// settings is not settled, and wants another look soon: the jobs are due to
+	// start or stop checking the database's certificate, a member was asked to
+	// reload the one its API presents, or the login pg_rewind runs as is not in
+	// the database yet.
+	securityPending bool
 }
 
 // refreshDelay is how long to wait before looking at a cluster again: soon
@@ -354,7 +355,7 @@ func refreshDelay(in refreshInputs) time.Duration {
 	switch {
 	case in.rolling:
 		return rolloutRequeueDelay
-	case !in.synced || !in.healthy || !in.monitorReady || !in.rolesReady || in.rotatingCredentials || in.certificatePending:
+	case !in.synced || !in.healthy || !in.monitorReady || !in.rolesReady || in.rotatingCredentials || in.securityPending:
 		return unhealthyRefreshInterval
 	}
 	return healthyRefreshInterval
@@ -476,6 +477,9 @@ func missingCredentials(secret *corev1.Secret, cluster *dbv1alpha1.PostgresClust
 	if apiAuthenticationOn(cluster) {
 		keys = append(keys, secretKeyPatroniAPI)
 	}
+	if restrictsReplication(cluster) {
+		keys = append(keys, secretKeyRewind)
+	}
 	for _, key := range keys {
 		if _, ok := secret.Data[key]; !ok {
 			return true
@@ -503,15 +507,19 @@ func fillMissingCredentials(secret *corev1.Secret, cluster *dbv1alpha1.PostgresC
 		}
 		secret.Data[key] = []byte(password)
 	}
-	// The API password is made only for a cluster that asks for it, and kept
-	// after it stops asking, so that asking again finds the pods and the Secret
-	// agreeing.
-	if _, ok := secret.Data[secretKeyPatroniAPI]; !ok && apiAuthenticationOn(cluster) {
-		password, err := generateAPIPassword()
-		if err != nil {
-			return fmt.Errorf("generating %s: %w", secretKeyPatroniAPI, err)
+	// The Patroni API's password and the rewind login's are made only for a
+	// cluster that asks for them, and kept after it stops asking, so that asking
+	// again finds the pods, the Secret and the database agreeing.
+	wanted := map[string]bool{secretKeyPatroniAPI: apiAuthenticationOn(cluster), secretKeyRewind: restrictsReplication(cluster)}
+	for key, asked := range wanted {
+		if _, ok := secret.Data[key]; ok || !asked {
+			continue
 		}
-		secret.Data[secretKeyPatroniAPI] = []byte(password)
+		password, err := generateConfigPassword()
+		if err != nil {
+			return fmt.Errorf("generating %s: %w", key, err)
+		}
+		secret.Data[key] = []byte(password)
 	}
 	return nil
 }

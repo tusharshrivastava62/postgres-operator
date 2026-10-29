@@ -563,6 +563,11 @@ type AccessControlStatus struct {
 	// +optional
 	MonitorRole RoleStatus `json:"monitorRole,omitzero"`
 
+	// rewindRole is the login Patroni runs pg_rewind as when
+	// spec.security.restrictReplicationRole is set, instead of the superuser.
+	// +optional
+	RewindRole RoleStatus `json:"rewindRole,omitzero"`
+
 	// credentials is the state of the superuser and replication passwords.
 	// +optional
 	Credentials CredentialsStatus `json:"credentials,omitzero"`

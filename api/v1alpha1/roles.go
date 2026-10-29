@@ -33,7 +33,7 @@ const (
 // make for themselves. An application role of the same name would take one
 // over, or be taken over by it.
 var reservedRoleNames = []string{
-	databasePostgres, "replicator", "admin", "cron_admin", "robot_zmon", "zalandos", "pgoperator_monitor",
+	databasePostgres, "replicator", "admin", "cron_admin", "robot_zmon", "zalandos", "pgoperator_monitor", "pgoperator_rewind",
 }
 
 // Role names that start with these are never an application's: PostgreSQL's

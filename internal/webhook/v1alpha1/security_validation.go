@@ -48,6 +48,9 @@ func securityWarnings(old, cluster *dbv1alpha1.PostgresCluster) admission.Warnin
 	if was.PatroniAPITLS() != now.PatroniAPITLS() {
 		warnings = append(warnings, apiTLSWarning(now.PatroniAPITLS()))
 	}
+	if was.RestrictsReplicationRole() != now.RestrictsReplicationRole() {
+		warnings = append(warnings, replicationRoleWarning(now.RestrictsReplicationRole()))
+	}
 	return warnings
 }
 
@@ -64,6 +67,19 @@ func certificateWarning(secret string) string {
 		"first and the primary after a switchover. Writes are refused for about two seconds. Until the primary has been replaced " +
 		"the operator does not check its certificate. The cluster is held back, with the reason in its status, if the Secret " +
 		"is missing, incomplete, or not valid for the cluster's Service and pod names."
+}
+
+func replicationRoleWarning(on bool) string {
+	if !on {
+		return "spec.security.restrictReplicationRole: " + replacesPods + " The replication role can log in like any other user " +
+			"again, the server's connection rules are the image's, and Patroni rewinds as the superuser. The pgoperator_rewind " +
+			"login is disabled, not dropped, once no pod uses it."
+	}
+	return "spec.security.restrictReplicationRole: " + replacesPods + " The server then refuses the replication role " +
+		"everything but replication, so anything of yours that logs in as it to run queries stops working. Patroni rewinds " +
+		"as pgoperator_rewind, a login that can only read the files pg_rewind needs, with its password in the credentials " +
+		"Secret as rewind-password. The operator writes the server's connection rules in place of the image's: the only ones " +
+		"that go are for a group role the image never creates."
 }
 
 func authenticationWarning(on, overTLS bool) string {

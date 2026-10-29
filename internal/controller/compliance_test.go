@@ -283,7 +283,7 @@ var _ = Describe("Compliance settings through the reconciler", func() {
 		sts := &appsv1.StatefulSet{}
 		ExpectWithOffset(1, k8sClient.Get(ctx, key(name), sts)).To(Succeed())
 		for _, e := range sts.Spec.Template.Spec.Containers[0].Env {
-			if e.Name == "SPILO_CONFIGURATION" {
+			if e.Name == envSpiloConfiguration {
 				return e.Value
 			}
 		}

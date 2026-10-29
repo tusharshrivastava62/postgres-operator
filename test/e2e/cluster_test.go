@@ -1451,6 +1451,9 @@ c.delete_bucket_lifecycle(Bucket=os.environ["AUDIT_BUCKET"])
 		By("giving the database a certificate that can be verified, and taking it away again")
 		tlsScenario(expectHealthy, podUIDs)
 
+		By("limiting the replication role, and having Patroni rewind a former primary as a login of its own")
+		replicationRoleScenario(expectHealthy, podUIDs)
+
 		By("swapping one standard for another by reloading, without replacing a pod")
 		during := podUIDs()
 		patchCompliance(`{"spec":{"compliance":{"standard":"soc2"}}}`)

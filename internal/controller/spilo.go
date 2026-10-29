@@ -12,6 +12,7 @@ package controller
 
 import (
 	"fmt"
+	"maps"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -23,6 +24,10 @@ import (
 
 	dbv1alpha1 "github.com/tusharshrivastava62/postgres-operator/api/v1alpha1"
 )
+
+// envSpiloConfiguration is the variable the image reads the cluster-specific
+// Patroni configuration from.
+const envSpiloConfiguration = "SPILO_CONFIGURATION"
 
 const (
 	// dropAllCapabilities is the Linux capability set dropped from every container.
@@ -99,8 +104,16 @@ func spiloConfiguration(cluster *dbv1alpha1.PostgresCluster) (string, error) {
 	}
 	// The one setting that cannot go through Patroni's REST API; see
 	// paramPreload. A cluster without compliance settings keeps Spilo's list.
+	postgresql := map[string]any{}
 	if libraries := preloadLibraries(cluster); libraries != "" {
-		config[dcsPostgresql] = map[string]any{dcsParameters: map[string]any{paramPreload: libraries}}
+		postgresql[dcsParameters] = map[string]any{paramPreload: libraries}
+	}
+	// Nor can who may connect, or which login pg_rewind runs as.
+	if restrictsReplication(cluster) {
+		maps.Copy(postgresql, restrictedPostgresql())
+	}
+	if len(postgresql) > 0 {
+		config[dcsPostgresql] = postgresql
 	}
 	out, err := yaml.Marshal(config)
 	if err != nil {
@@ -141,11 +154,14 @@ func spiloEnv(cluster *dbv1alpha1.PostgresCluster) ([]corev1.EnvVar, error) {
 		{Name: "POD_IP", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"}}},
 		{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}}},
 	}...)
-	// The configuration refers to this variable, so it has to come first.
+	// The configuration refers to these variables, so they have to come first.
 	if apiAuthenticationOn(cluster) {
 		env = append(env, corev1.EnvVar{Name: envRESTAPIPassword, ValueFrom: secretKeyRef(cluster, secretKeyPatroniAPI)})
 	}
-	env = append(env, corev1.EnvVar{Name: "SPILO_CONFIGURATION", Value: config})
+	if restrictsReplication(cluster) {
+		env = append(env, corev1.EnvVar{Name: envRewindPassword, ValueFrom: secretKeyRef(cluster, secretKeyRewind)})
+	}
+	env = append(env, corev1.EnvVar{Name: envSpiloConfiguration, Value: config})
 	return append(env, backup...), nil
 }
 
