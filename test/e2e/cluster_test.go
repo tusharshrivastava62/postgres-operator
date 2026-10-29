@@ -1540,9 +1540,13 @@ c.delete_bucket_lifecycle(Bucket=os.environ["AUDIT_BUCKET"])
 		// The bracketed pattern matches the words patroni and postgres but not
 		// its own text, so the shell running this script (whose command line
 		// contains the pattern) is not stopped along with them.
+		//
+		// A process can end between being listed and being signalled (a backend
+		// or a wal sender, for one), and kill then says there is no such process
+		// and fails the script. It is not an error here, so it is ignored.
 		signalAll := func(signal string) string {
 			return `for p in $(pgrep -f "[p]atroni|[p]ostgres"); do ` +
-				`if [ "$p" != 1 ] && [ "$p" != "$$" ]; then kill -` + signal + ` "$p"; fi; done`
+				`if [ "$p" != 1 ] && [ "$p" != "$$" ]; then kill -` + signal + ` "$p" 2>/dev/null || true; fi; done`
 		}
 		freeze, thaw := signalAll("STOP"), signalAll("CONT")
 		DeferCleanup(func() { _, _ = runInPod(old, thaw) })
