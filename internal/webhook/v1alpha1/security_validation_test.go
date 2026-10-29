@@ -143,6 +143,48 @@ var _ = Describe("PostgresCluster security validation", func() {
 		Expect(strings.Join(warnings, " ")).To(And(ContainSubstring("log in like any other user again"), ContainSubstring("disabled, not dropped")))
 	})
 
+	It("warns that limiting ingress cuts off a pod without the client label, and that no pod is replaced", func() {
+		limited := cluster.DeepCopy()
+		limited.Spec.Security = &dbv1alpha1.SecuritySpec{NetworkPolicy: &dbv1alpha1.NetworkPolicySpec{
+			Ingress: &dbv1alpha1.IngressPolicySpec{Mode: dbv1alpha1.NetworkPolicyRestricted}}}
+		warnings, err := validator.ValidateUpdate(ctx, cluster, limited)
+		Expect(err).NotTo(HaveOccurred())
+		joined := strings.Join(warnings, " ")
+		Expect(joined).To(And(ContainSubstring("networkPolicy.ingress"), ContainSubstring("db.youroperator.io/client=true"),
+			ContainSubstring("loses its connection"), ContainSubstring("No pod is replaced"), ContainSubstring("enforces NetworkPolicy")))
+		Expect(joined).NotTo(ContainSubstring("every database pod is replaced"))
+
+		warnings, err = validator.ValidateUpdate(ctx, limited, cluster)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.Join(warnings, " ")).To(ContainSubstring("any pod can connect to the database again"))
+	})
+
+	It("warns what limiting egress leaves the pods able to reach, and that a backup destination must be listed", func() {
+		limited := cluster.DeepCopy()
+		limited.Spec.Security = &dbv1alpha1.SecuritySpec{NetworkPolicy: &dbv1alpha1.NetworkPolicySpec{
+			Egress: &dbv1alpha1.EgressPolicySpec{Mode: dbv1alpha1.NetworkPolicyRestricted}}}
+		warnings, err := validator.ValidateCreate(ctx, limited)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.Join(warnings, " ")).To(And(ContainSubstring("networkPolicy.egress"), ContainSubstring("only to DNS"),
+			ContainSubstring("API server"), ContainSubstring("backup destination"), ContainSubstring("No pod is replaced")))
+
+		warnings, err = validator.ValidateUpdate(ctx, limited, cluster)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.Join(warnings, " ")).To(ContainSubstring("connect anywhere again"))
+	})
+
+	It("refuses limiting egress for a cluster with backups when nothing is listed, naming the field", func() {
+		limited := cluster.DeepCopy()
+		limited.Spec.Backup = dbv1alpha1.BackupSpec{Enabled: true, Destination: &dbv1alpha1.BackupDestination{
+			Bucket: "b", CredentialsSecret: "s"}}
+		limited.Spec.Security = &dbv1alpha1.SecuritySpec{NetworkPolicy: &dbv1alpha1.NetworkPolicySpec{
+			Egress: &dbv1alpha1.EgressPolicySpec{Mode: dbv1alpha1.NetworkPolicyRestricted}}}
+		_, err := validator.ValidateCreate(ctx, limited)
+		Expect(err).To(MatchError(ContainSubstring("spec.security.networkPolicy.egress.allow")))
+		_, err = validator.ValidateUpdate(ctx, cluster, limited)
+		Expect(err).To(MatchError(ContainSubstring("backups go to an object store")))
+	})
+
 	It("does not warn about a change that leaves the certificate as it was", func() {
 		changed := withTLS("orders-tls")
 		changed.Spec.Instances = 3

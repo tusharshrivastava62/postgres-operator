@@ -63,7 +63,7 @@ var _ = Describe("The network policy", func() {
 	}
 	build := func(c *dbv1alpha1.PostgresCluster) *networkingv1.NetworkPolicy {
 		GinkgoHelper()
-		policy, err := desiredNetworkPolicy(c, testOperator)
+		policy, err := desiredNetworkPolicy(c, testOperator, nil)
 		Expect(err).NotTo(HaveOccurred())
 		return policy
 	}
@@ -254,7 +254,7 @@ var _ = Describe("The network policy", func() {
 	})
 
 	It("is refused, with a reason, when the operator does not know which pods it is", func() {
-		_, err := desiredNetworkPolicy(cluster(), nil)
+		_, err := desiredNetworkPolicy(cluster(), nil, nil)
 		Expect(err).To(MatchError(ContainSubstring("does not know which pods it runs as")))
 	})
 

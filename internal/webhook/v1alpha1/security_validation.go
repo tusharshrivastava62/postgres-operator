@@ -48,6 +48,12 @@ func securityWarnings(old, cluster *dbv1alpha1.PostgresCluster) admission.Warnin
 	if was.PatroniAPITLS() != now.PatroniAPITLS() {
 		warnings = append(warnings, apiTLSWarning(now.PatroniAPITLS()))
 	}
+	if was.RestrictsIngress() != now.RestrictsIngress() {
+		warnings = append(warnings, ingressWarning(now.RestrictsIngress()))
+	}
+	if was.RestrictsEgress() != now.RestrictsEgress() {
+		warnings = append(warnings, egressWarning(now.RestrictsEgress()))
+	}
 	if was.RestrictsReplicationRole() != now.RestrictsReplicationRole() {
 		warnings = append(warnings, replicationRoleWarning(now.RestrictsReplicationRole()))
 	}
@@ -67,6 +73,26 @@ func certificateWarning(secret string) string {
 		"first and the primary after a switchover. Writes are refused for about two seconds. Until the primary has been replaced " +
 		"the operator does not check its certificate. The cluster is held back, with the reason in its status, if the Secret " +
 		"is missing, incomplete, or not valid for the cluster's Service and pod names."
+}
+
+const appliedAtOnce = "No pod is replaced: the policy takes effect at once, and only if the cluster's network plugin enforces NetworkPolicy."
+
+func ingressWarning(on bool) string {
+	if !on {
+		return "spec.security.networkPolicy.ingress: any pod can connect to the database again, unless a compliance preset limits it. " + appliedAtOnce
+	}
+	return "spec.security.networkPolicy.ingress: only pods labelled db.youroperator.io/client=true in the cluster's namespace, " +
+		"the operator, the cluster's own pods and jobs, and the peers you list can connect, so an application without the label " +
+		"loses its connection. " + appliedAtOnce
+}
+
+func egressWarning(on bool) string {
+	if !on {
+		return "spec.security.networkPolicy.egress: the database pods can connect anywhere again. " + appliedAtOnce
+	}
+	return "spec.security.networkPolicy.egress: the database pods can then connect only to DNS, to each other, to the Kubernetes " +
+		"API server, and to what you list. Anything else they need, such as a backup destination or a DNS that is not kube-dns " +
+		"in kube-system, fails until you list it. " + appliedAtOnce
 }
 
 func replicationRoleWarning(on bool) string {

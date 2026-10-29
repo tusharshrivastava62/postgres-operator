@@ -1454,6 +1454,9 @@ c.delete_bucket_lifecycle(Bucket=os.environ["AUDIT_BUCKET"])
 		By("limiting the replication role, and having Patroni rewind a former primary as a login of its own")
 		replicationRoleScenario(expectHealthy, podUIDs)
 
+		By("limiting what the pods may reach, and letting only the object store through")
+		networkPolicyScenario(expectHealthy, podUIDs)
+
 		By("swapping one standard for another by reloading, without replacing a pod")
 		during := podUIDs()
 		patchCompliance(`{"spec":{"compliance":{"standard":"soc2"}}}`)

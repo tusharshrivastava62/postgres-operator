@@ -109,7 +109,7 @@ func (r *PostgresClusterReconciler) policyState(ctx context.Context, cluster *db
 	if err != nil {
 		return policyState{}, err
 	}
-	desired, err := desiredNetworkPolicy(cluster, r.Operator)
+	desired, err := r.desiredPolicy(ctx, cluster)
 	if err != nil {
 		return policyState{Found: true}, nil //nolint:nilerr // without the operator's identity there is nothing to compare with
 	}

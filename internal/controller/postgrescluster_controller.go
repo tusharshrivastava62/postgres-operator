@@ -163,7 +163,7 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	// A network policy has to name the operator, or it would cut the operator
 	// off from Patroni. Without knowing which pods it is, build nothing.
-	if networkPolicyWanted(cluster) && r.Operator == nil {
+	if ingressRestricted(cluster) && r.Operator == nil {
 		const message = "the operator could not tell which pods it runs as, which the network policy needs to let it through: " +
 			"set POD_NAMESPACE and POD_NAME from the downward API on its pod"
 		log.Info("not reconciling: " + message)

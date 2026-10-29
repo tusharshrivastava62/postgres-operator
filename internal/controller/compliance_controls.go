@@ -360,7 +360,13 @@ func networkIsolation(in controlInputs) result {
 	if _, why := in.sql(); why != "" {
 		return unknown("an unlabelled pod was refused, but the database could not be reached to show that the policy was the reason: %s", why)
 	}
-	return met("the policy is in place and a pod with none of the allowed labels was refused (%s)", in.Probe.report.Result)
+	evidence := fmt.Sprintf("the policy is in place and a pod with none of the allowed labels was refused (%s)", in.Probe.report.Result)
+	if egressRestricted(in.Cluster) {
+		// The probe is a pod that connects in; nothing here connects out from a
+		// database pod, so what the egress rules do is the plugin's to enforce.
+		evidence += "; egress is limited by the policy as well, and whether the network plugin enforces egress is not checked"
+	}
+	return met("%s", evidence)
 }
 
 func backupRecovery(in controlInputs) result {

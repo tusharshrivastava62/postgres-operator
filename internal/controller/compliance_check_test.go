@@ -71,7 +71,7 @@ var _ = Describe("The compliance check CronJob", func() {
 		c := cluster()
 		labels := spec().JobTemplate.Spec.Template.Labels
 		Expect(labels[labelAppComponent]).To(Equal(componentComplianceCheck))
-		policy, err := desiredNetworkPolicy(c, testOperator)
+		policy, err := desiredNetworkPolicy(c, testOperator, nil)
 		Expect(err).NotTo(HaveOccurred())
 		jobs := policy.Spec.Ingress[2].From[0].PodSelector
 		Expect(matches(jobs, labels)).To(BeTrue())
@@ -128,7 +128,7 @@ var _ = Describe("The network probe CronJob", func() {
 		labels := spec().JobTemplate.Spec.Template.Labels
 		Expect(labels[labelAppComponent]).To(Equal(componentNetworkProbe))
 		Expect(labels).NotTo(HaveKey(labelClient))
-		policy, err := desiredNetworkPolicy(c, testOperator)
+		policy, err := desiredNetworkPolicy(c, testOperator, nil)
 		Expect(err).NotTo(HaveOccurred())
 		for _, rule := range policy.Spec.Ingress {
 			for _, peer := range rule.From {

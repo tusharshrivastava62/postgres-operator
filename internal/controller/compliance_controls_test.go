@@ -495,6 +495,19 @@ var _ = Describe("The compliance controls", func() {
 			Expect(c.Evidence).To(ContainSubstring("(timeout)"))
 		})
 
+		It("says egress is limited and not checked, when the cluster limits it, and says nothing of it otherwise", func() {
+			plain := resultOf(dbv1alpha1.ControlNetworkIsolation, inputs())
+			Expect(plain.Evidence).NotTo(ContainSubstring("egress"))
+
+			in := inputs()
+			in.Cluster.Spec.Security = &dbv1alpha1.SecuritySpec{NetworkPolicy: &dbv1alpha1.NetworkPolicySpec{
+				Egress: &dbv1alpha1.EgressPolicySpec{Mode: dbv1alpha1.NetworkPolicyRestricted}}}
+			limited := resultOf(dbv1alpha1.ControlNetworkIsolation, in)
+			Expect(limited.Status).To(Equal(dbv1alpha1.ControlMet))
+			Expect(limited.Evidence).To(ContainSubstring("egress is limited by the policy as well"))
+			Expect(limited.Evidence).To(ContainSubstring("whether the network plugin enforces egress is not checked"))
+		})
+
 		It("is met when the stranger was refused outright, which some network plugins do instead of dropping", func() {
 			for _, answer := range []string{"refused", "unreachable"} {
 				in := inputs()

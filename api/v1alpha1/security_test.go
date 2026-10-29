@@ -13,6 +13,8 @@ package v1alpha1
 import (
 	"strings"
 	"testing"
+
+	networkingv1 "k8s.io/api/networking/v1"
 )
 
 const secretOK = "orders-tls"
@@ -73,4 +75,82 @@ func TestTheCertificateSecretNameMustBeAName(t *testing.T) {
 			}
 		}
 	}
+}
+
+func egressOnly(allow ...networkingv1.NetworkPolicyEgressRule) *SecuritySpec {
+	return &SecuritySpec{NetworkPolicy: &NetworkPolicySpec{Egress: &EgressPolicySpec{Mode: NetworkPolicyRestricted, Allow: allow}}}
+}
+
+func TestADirectionIsLimitedOnlyWhenItsModeSaysSo(t *testing.T) {
+	var unset *SecuritySpec
+	if unset.RestrictsIngress() || unset.RestrictsEgress() || len(unset.IngressAllowFrom()) != 0 || len(unset.EgressAllow()) != 0 {
+		t.Error("a cluster with no security settings is limited")
+	}
+	if (&SecuritySpec{NetworkPolicy: &NetworkPolicySpec{}}).RestrictsEgress() {
+		t.Error("an empty policy limits egress")
+	}
+	odd := &SecuritySpec{NetworkPolicy: &NetworkPolicySpec{
+		Ingress: &IngressPolicySpec{Mode: "Open", AllowFrom: []networkingv1.NetworkPolicyPeer{{}}},
+		Egress:  &EgressPolicySpec{Mode: "Open", Allow: []networkingv1.NetworkPolicyEgressRule{{}}},
+	}}
+	if odd.RestrictsIngress() || odd.RestrictsEgress() || len(odd.IngressAllowFrom()) != 0 || len(odd.EgressAllow()) != 0 {
+		t.Error("a mode other than Restricted limits a direction, or its list is used")
+	}
+}
+
+func TestEgressNeedsSomewhereToReachTheObjectStoreWhenThereIsOne(t *testing.T) {
+	store := networkingv1.NetworkPolicyEgressRule{To: []networkingv1.NetworkPolicyPeer{{}}}
+	backups := func(spec *PostgresClusterSpec) {
+		spec.Backup = BackupSpec{Enabled: true, Destination: &BackupDestination{Bucket: "b"}}
+	}
+	audit := func(spec *PostgresClusterSpec) {
+		spec.Compliance = &ComplianceSpec{Standard: StandardHIPAA, AuditLogs: AuditLogsSpec{Destination: &BackupDestination{Bucket: "a"}}}
+	}
+	restore := func(spec *PostgresClusterSpec) {
+		spec.Bootstrap = &BootstrapSpec{Recovery: &RecoverySpec{Destination: BackupDestination{Bucket: "r"}}}
+	}
+	cases := []struct {
+		name    string
+		uses    []func(*PostgresClusterSpec)
+		allow   []networkingv1.NetworkPolicyEgressRule
+		refused string
+	}{
+		{"nothing goes to a store", nil, nil, ""},
+		{"backups, nowhere listed", []func(*PostgresClusterSpec){backups}, nil, "backups go to an object store"},
+		{"audit logs, nowhere listed", []func(*PostgresClusterSpec){audit}, nil, "audit logs go to an object store"},
+		{"a restore, nowhere listed", []func(*PostgresClusterSpec){restore}, nil, "restores go to an object store"},
+		{"all three, nowhere listed", []func(*PostgresClusterSpec){backups, audit, restore}, nil, "backups, audit logs, restores go to an object store"},
+		{"backups, somewhere listed", []func(*PostgresClusterSpec){backups}, []networkingv1.NetworkPolicyEgressRule{store}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			spec := &PostgresClusterSpec{Security: egressOnly(c.allow...)}
+			for _, use := range c.uses {
+				use(spec)
+			}
+			errs := spec.ValidateSecurity()
+			switch {
+			case c.refused == "" && len(errs) != 0:
+				t.Errorf("refused: %v", errs)
+			case c.refused != "" && (len(errs) != 1 || !strings.Contains(errs[0].Error(), c.refused) ||
+				errs[0].Field != "spec.security.networkPolicy.egress.allow"):
+				t.Errorf("errors %v, want one on spec.security.networkPolicy.egress.allow about %q", errs, c.refused)
+			}
+		})
+	}
+
+	t.Run("backups that are not enabled go nowhere", func(t *testing.T) {
+		spec := &PostgresClusterSpec{Security: egressOnly(), Backup: BackupSpec{Enabled: false, Destination: &BackupDestination{Bucket: "b"}}}
+		if errs := spec.ValidateSecurity(); len(errs) != 0 {
+			t.Errorf("refused: %v", errs)
+		}
+	})
+	t.Run("limiting ingress needs nothing listed", func(t *testing.T) {
+		spec := &PostgresClusterSpec{Security: &SecuritySpec{NetworkPolicy: &NetworkPolicySpec{
+			Ingress: &IngressPolicySpec{Mode: NetworkPolicyRestricted}}}}
+		backups(spec)
+		if errs := spec.ValidateSecurity(); len(errs) != 0 {
+			t.Errorf("refused: %v", errs)
+		}
+	})
 }

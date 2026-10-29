@@ -11,6 +11,9 @@ work becomes available under the Change License (Apache-2.0).
 package v1alpha1
 
 import (
+	"strings"
+
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -66,6 +69,61 @@ type SecuritySpec struct {
 	// create. Setting it replaces the pods one at a time.
 	// +optional
 	RestrictReplicationRole bool `json:"restrictReplicationRole,omitempty"`
+
+	// networkPolicy limits what can reach the database pods, and what they can
+	// reach. A compliance preset already limits what can reach them.
+	// +optional
+	NetworkPolicy *NetworkPolicySpec `json:"networkPolicy,omitempty"`
+}
+
+// The one value a network policy mode has: the direction is limited.
+const NetworkPolicyRestricted = "Restricted"
+
+// NetworkPolicySpec limits the database pods' traffic.
+type NetworkPolicySpec struct {
+	// ingress limits what can connect to the database pods.
+	// +optional
+	Ingress *IngressPolicySpec `json:"ingress,omitempty"`
+
+	// egress limits what the database pods can connect to.
+	// +optional
+	Egress *EgressPolicySpec `json:"egress,omitempty"`
+}
+
+// IngressPolicySpec limits what can connect to the database pods.
+type IngressPolicySpec struct {
+	// mode is Restricted: only pods labelled db.youroperator.io/client=true in
+	// the cluster's own namespace, the operator, the cluster's own pods and jobs,
+	// and the peers listed below may connect. It is what a compliance preset
+	// already does, for a cluster that has none. It depends on the cluster's
+	// network plugin enforcing NetworkPolicy.
+	// +kubebuilder:validation:Enum=Restricted
+	// +kubebuilder:validation:Required
+	Mode string `json:"mode"`
+
+	// allowFrom lists additional peers that may connect to PostgreSQL.
+	// +kubebuilder:validation:MaxItems=20
+	// +optional
+	AllowFrom []networkingv1.NetworkPolicyPeer `json:"allowFrom,omitempty"`
+}
+
+// EgressPolicySpec limits what the database pods can connect to.
+type EgressPolicySpec struct {
+	// mode is Restricted: the database pods may connect only to DNS, to each
+	// other, to the Kubernetes API server (which Patroni keeps its leader lock
+	// in), and to what is listed below. A network policy cannot name a host, so
+	// the object store that backups, restores and audit logs go to has to be
+	// listed, by address or by the pods that serve it, and a cluster that has
+	// any of them must list something. It depends on the cluster's network
+	// plugin enforcing NetworkPolicy for egress, which not every plugin does.
+	// +kubebuilder:validation:Enum=Restricted
+	// +kubebuilder:validation:Required
+	Mode string `json:"mode"`
+
+	// allow lists where else the database pods may connect.
+	// +kubebuilder:validation:MaxItems=20
+	// +optional
+	Allow []networkingv1.NetworkPolicyEgressRule `json:"allow,omitempty"`
 }
 
 // PatroniAPISpec says who may change a cluster through Patroni's REST API.
@@ -154,6 +212,38 @@ func (s *SecuritySpec) TLSSecretName() string {
 	return s.TLS.SecretName
 }
 
+// RestrictsIngress is whether the cluster limits what can connect to its
+// database pods because spec.security says so. A compliance preset does it too.
+func (s *SecuritySpec) RestrictsIngress() bool {
+	return s != nil && s.NetworkPolicy != nil && s.NetworkPolicy.Ingress != nil &&
+		s.NetworkPolicy.Ingress.Mode == NetworkPolicyRestricted
+}
+
+// RestrictsEgress is whether the cluster limits what its database pods can
+// connect to.
+func (s *SecuritySpec) RestrictsEgress() bool {
+	return s != nil && s.NetworkPolicy != nil && s.NetworkPolicy.Egress != nil &&
+		s.NetworkPolicy.Egress.Mode == NetworkPolicyRestricted
+}
+
+// IngressAllowFrom is the peers spec.security lets connect, besides the ones
+// that always may.
+func (s *SecuritySpec) IngressAllowFrom() []networkingv1.NetworkPolicyPeer {
+	if !s.RestrictsIngress() {
+		return nil
+	}
+	return s.NetworkPolicy.Ingress.AllowFrom
+}
+
+// EgressAllow is where spec.security lets the database pods connect, besides
+// where they always may.
+func (s *SecuritySpec) EgressAllow() []networkingv1.NetworkPolicyEgressRule {
+	if !s.RestrictsEgress() {
+		return nil
+	}
+	return s.NetworkPolicy.Egress.Allow
+}
+
 // RestrictsReplicationRole is whether the replication role is to be limited to
 // replicating, and pg_rewind given a login of its own.
 func (s *SecuritySpec) RestrictsReplicationRole() bool {
@@ -175,7 +265,34 @@ func (s *SecuritySpec) PatroniAPITLS() bool {
 // that fails it, and the controller checks again, since a webhook is not always
 // there.
 func (s *PostgresClusterSpec) ValidateSecurity() field.ErrorList {
-	return s.Security.validate(field.NewPath("spec", "security"))
+	path := field.NewPath("spec", "security")
+	errs := s.Security.validate(path)
+	// A cluster whose pods may connect to nothing else cannot reach its object
+	// store, and WAL would pile up on the primary's disk with nothing saying why.
+	// A network policy cannot name a host, so the person says where it is.
+	if s.Security.RestrictsEgress() && len(s.Security.EgressAllow()) == 0 {
+		if what := s.objectStoreUses(); what != "" {
+			errs = append(errs, field.Required(path.Child("networkPolicy", "egress", "allow"),
+				what+" go to an object store, which a network policy cannot name: list where it is, by address or by the pods that serve it"))
+		}
+	}
+	return errs
+}
+
+// objectStoreUses says what in the spec connects to an object store, or is
+// empty if nothing does.
+func (s *PostgresClusterSpec) objectStoreUses() string {
+	var uses []string
+	if s.Backup.Enabled && s.Backup.Destination != nil {
+		uses = append(uses, "backups")
+	}
+	if s.Compliance != nil && s.Compliance.AuditLogs.Destination != nil {
+		uses = append(uses, "audit logs")
+	}
+	if s.Recovery() != nil {
+		uses = append(uses, "restores")
+	}
+	return strings.Join(uses, ", ")
 }
 
 // validate checks the shape of the settings. What is in the Secret is for the
