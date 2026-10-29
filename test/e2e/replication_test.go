@@ -123,7 +123,7 @@ func replicationRoleScenario(healthy func(Gomega), podUIDs func() string) {
 	}
 	EventuallyWithOffset(1, rewound, 4*time.Minute, 5*time.Second).Should(
 		MatchRegexp(`running pg_rewind from dbname=postgres user=`+rewindRoleName+` `), "not as the superuser")
-	ExpectWithOffset(1, rewound()).To(ContainSubstring("pg_rewind exit code=0"))
+	EventuallyWithOffset(1, rewound, 2*time.Minute, 5*time.Second).Should(ContainSubstring("pg_rewind exit code=0"))
 	EventuallyWithOffset(1, healthy, 3*time.Minute, pollEvery).Should(Succeed())
 	primary = primaryNow()
 	ExpectWithOffset(1, primary).NotTo(Equal(old))
