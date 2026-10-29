@@ -86,10 +86,9 @@ func networkPolicyScenario(healthy func(Gomega), podUIDs func() string) {
 	ExpectWithOffset(1, reaches(primary, dnsIP, dnsMetricsPort)).To(BeTrue(), "before the limit, a pod can reach whatever it likes")
 
 	By("refusing a limit that leaves no way to the object store")
-	out, err := inCluster("patch", "postgrescluster", clusterName, "--type=merge", "-p",
+	_, err = inCluster("patch", "postgrescluster", clusterName, "--type=merge", "-p",
 		`{"spec":{"security":{"networkPolicy":{"egress":{"mode":"Restricted"}}}}}`)
-	ExpectWithOffset(1, err).To(HaveOccurred(), out)
-	ExpectWithOffset(1, out).To(ContainSubstring("a network policy cannot name"))
+	ExpectWithOffset(1, err).To(MatchError(ContainSubstring("a network policy cannot name")))
 
 	By("limiting what the pods may reach: the policy takes effect at once, and no pod is replaced")
 	before := podUIDs()
@@ -109,7 +108,7 @@ func networkPolicyScenario(healthy func(Gomega), podUIDs func() string) {
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 	ExpectWithOffset(1, reaches(primary, replicaIP, 5432)).To(BeTrue(), "its own pods")
 	ExpectWithOffset(1, reaches(primary, replicaIP, 8008)).To(BeTrue())
-	kubernetesHost, err := kubectlOut("get", "endpoints", "kubernetes", "-o", "jsonpath={.subsets[0].addresses[0].ip}:{.subsets[0].ports[0].port}")
+	kubernetesHost, err := kubectlOut("-n", "default", "get", "endpoints", "kubernetes", "-o", "jsonpath={.subsets[0].addresses[0].ip}:{.subsets[0].ports[0].port}")
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 	address, port, _ := strings.Cut(kubernetesHost, ":")
 	var apiPort int
