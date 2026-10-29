@@ -26,12 +26,12 @@ helm install postgres-operator charts/postgres-operator \
 
 ## Compliance clusters and network policies
 
-A `PostgresCluster` with `spec.compliance` gets a `NetworkPolicy` that has to let the operator
-through to Patroni. The operator finds its own pods by reading its own pod at start, so the
+A `PostgresCluster` with `spec.compliance` or `spec.security.networkPolicy.ingress` gets a
+`NetworkPolicy` that has to let the operator through to Patroni. The operator finds its own pods by reading its own pod at start, so the
 manager Deployment sets `POD_NAME` and `POD_NAMESPACE` from the downward API, and the chart's RBAC
 lets the operator manage `networkpolicies`. If you replace the Deployment, keep both variables, or
-clusters with compliance settings will be held back with a message saying why. See
-[`docs/compliance.md`](../../docs/compliance.md).
+those clusters will be held back with a message saying why. See
+[`docs/compliance.md`](../../docs/compliance.md) and [`docs/security.md`](../../docs/security.md).
 
 ## Emergency access
 

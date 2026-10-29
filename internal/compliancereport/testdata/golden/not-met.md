@@ -37,21 +37,21 @@
 
 ## Not checked by the operator
 
-This list is not exhaustive. Anything that is not in the table above is not checked.
+Anything that is not in the table above is not checked.
 
-- Everything about people and process.
-- Whether the audit is enough.
-- That the audit log cannot be altered.
-- Retention is not enforced.
+- People and process.
+- The scope of the audit.
+- Protecting the audit log.
+- Retention.
 - Encryption at rest.
+- The network.
 - Certificates.
-- The network beyond the database pods.
-- Who can do what inside the database.
+- Roles and credentials.
 - Emergency access, if you allow it.
 - The cluster around it.
-- Changes between checks, and checks that stop.
+- Checks that stop.
 
-The full lists are in docs/compliance.md and docs/emergency-access.md in the operator's repository.
+The full lists are in docs/compliance.md (What you remain responsible for) and docs/emergency-access.md in the operator's repository.
 
 ## Emergency access
 

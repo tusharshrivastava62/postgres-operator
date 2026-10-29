@@ -1,0 +1,79 @@
+# A cluster with every security option in spec.security on: a server certificate
+# that clients can verify, a Patroni REST API that needs a password and answers
+# over TLS, a replication role limited to replicating, and a network policy that
+# limits where the database pods may connect. See docs/security.md.
+#
+# Before you apply it:
+#
+#   1. Create a Secret named my-database-tls with tls.crt, tls.key and ca.crt, for
+#      example from cert-manager. The certificate must be valid for
+#      postgrescluster-security-sample.<namespace>.svc and
+#      *.postgrescluster-security-sample-headless.<namespace>.svc.cluster.local.
+#
+#   2. Create the backup Secrets:
+#
+#        kubectl create secret generic backup-s3 \
+#          --from-literal=AWS_ACCESS_KEY_ID=... --from-literal=AWS_SECRET_ACCESS_KEY=...
+#        kubectl create secret generic backup-key \
+#          --from-literal=libsodium-key="$(openssl rand -hex 32)"
+#
+#   3. Change the object store's endpoint, and the egress rule that lets the
+#      database pods reach it, to where your object store is. A network policy
+#      cannot name a host, so the rule names the pods that serve the store.
+#
+# Your network plugin has to enforce NetworkPolicy for egress. The operator does
+# not check that it does.
+#
+# Setting these on a running cluster replaces its pods one at a time.
+apiVersion: db.youroperator.io/v1alpha1
+kind: PostgresCluster
+metadata:
+  labels:
+    app.kubernetes.io/name: postgres-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: postgrescluster-security-sample
+spec:
+  instances: 3
+  version: "17"
+  storage:
+    size: 10Gi
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      memory: "1Gi"
+  backup:
+    enabled: true
+    schedule: "0 2 * * *"
+    destination:
+      bucket: my-database-backups
+      endpoint: http://s3.object-store.svc.cluster.local:8333
+      forcePathStyle: true
+      credentialsSecret: backup-s3
+    encryption:
+      keySecret: backup-key
+    retention:
+      full: 7
+      days: 14
+  security:
+    tls:
+      secretName: my-database-tls
+      patroniAPI: true
+    patroniAPI:
+      authentication: true
+    restrictReplicationRole: true
+    networkPolicy:
+      egress:
+        mode: Restricted
+        allow:
+        - to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: object-store
+            podSelector:
+              matchLabels:
+                app: s3
+          ports:
+          - protocol: TCP
+            port: 8333

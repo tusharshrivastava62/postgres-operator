@@ -31,8 +31,8 @@ const (
 	// NotAProofForAuditors is the instruction that follows ControlsMetMeaning.
 	NotAProofForAuditors = "Do not present it to an auditor as proof of compliance."
 
-	// NotExhaustive opens the list of what the operator cannot check.
-	NotExhaustive = "This list is not exhaustive. Anything that is not in the table above is not checked."
+	// NotExhaustive opens the list of what the user remains responsible for.
+	NotExhaustive = "Anything that is not in the table above is not checked."
 
 	// ChecksStop is what happens when the jobs stop reporting.
 	ChecksStop = "If the jobs stop running, the controls that rest on their reports go Unknown after 35 minutes."
@@ -54,21 +54,21 @@ const (
 	EmergencyAuditors = "If you are using emergency access as part of an audit, your auditors will be able to read every value you used."
 )
 
-// NotChecked is the headings of docs/compliance.md's "What the operator cannot
-// check", in the order the docs give them.
+// NotChecked is the headings of docs/compliance.md's "What you remain
+// responsible for", in the order the docs give them.
 var NotChecked = []string{
-	"Everything about people and process.",
-	"Whether the audit is enough.",
-	"That the audit log cannot be altered.",
-	"Retention is not enforced.",
+	"People and process.",
+	"The scope of the audit.",
+	"Protecting the audit log.",
+	"Retention.",
 	"Encryption at rest.",
+	"The network.",
 	"Certificates.",
-	"The network beyond the database pods.",
-	"Who can do what inside the database.",
+	"Roles and credentials.",
 	"Emergency access, if you allow it.",
 	"The cluster around it.",
-	"Changes between checks, and checks that stop.",
+	"Checks that stop.",
 }
 
 // DocsPointer says where the full lists are.
-const DocsPointer = "docs/compliance.md and docs/emergency-access.md in the operator's repository"
+const DocsPointer = "docs/compliance.md (What you remain responsible for) and docs/emergency-access.md in the operator's repository"

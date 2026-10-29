@@ -82,15 +82,15 @@ func TestTheReportsOwnPageSaysTheSameThings(t *testing.T) {
 func TestNotCheckedFollowsTheDocsInOrder(t *testing.T) {
 	compliance := plainDoc(t, "compliance.md")
 	// The heading's marks are stripped, so look for its words.
-	_, section, found := strings.Cut(compliance, "What the operator cannot check This list is not exhaustive")
+	_, section, found := strings.Cut(compliance, "What you remain responsible for Anything that is not in the table above is not checked")
 	if !found {
-		t.Fatal("docs/compliance.md has no section on what the operator cannot check")
+		t.Fatal("docs/compliance.md has no section on what the user remains responsible for")
 	}
 	at := 0
 	for _, item := range NotChecked {
 		i := strings.Index(section[at:], item)
 		if i < 0 {
-			t.Fatalf("%q is not in the docs' list of what the operator cannot check, or is out of order", item)
+			t.Fatalf("%q is not in the docs' list of what the user remains responsible for, or is out of order", item)
 		}
 		at += i + len(item)
 	}
