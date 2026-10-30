@@ -25,7 +25,10 @@ import (
 // The samples are what people copy first, so each has to be something the
 // webhook admits, and each has to be in the kustomization that applies them.
 var _ = Describe("The sample manifests", func() {
-	const dir = "../../../config/samples"
+	const (
+		dir            = "../../../config/samples"
+		securitySample = "db_v1alpha1_postgrescluster_security.yaml"
+	)
 
 	samples := func() []string {
 		matches, err := filepath.Glob(filepath.Join(dir, "db_v1alpha1_postgrescluster*.yaml"))
@@ -45,6 +48,13 @@ var _ = Describe("The sample manifests", func() {
 
 			warnings, err := validator.ValidateCreate(ctx, cluster)
 			Expect(err).NotTo(HaveOccurred(), "%s: %v", path, err)
+			if filepath.Base(path) == securitySample {
+				// It turns on the options that replace pods, and the webhook says so.
+				for _, warning := range warnings {
+					Expect(warning).To(HavePrefix("spec.security."), "%s: only the security options may warn", path)
+				}
+				continue
+			}
 			Expect(warnings).To(BeEmpty(), "%s: a sample should not warn", path)
 		}
 	})
